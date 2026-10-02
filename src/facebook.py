@@ -8,6 +8,10 @@ from .models import FacebookPackage, GeneratedContent
 
 CTA_LINE = "التفاصيل الكاملة وما حدث بعد ذلك تجدها في المقال 👇"
 
+MAX_FACEBOOK_POST_LENGTH = 63206
+MAX_FACEBOOK_TITLE_LENGTH = 255
+MAX_FACEBOOK_COMMENT_LENGTH = 10000
+
 
 class FacebookError(Exception):
     pass
@@ -33,35 +37,97 @@ def _contains_url(text: str) -> bool:
     return False
 
 
-def _validate_blogger_url(blogger_url: str) -> None:
-    """Validate that the supplied URL is a real HTTPS Blogger destination."""
-    u = urlparse(
-        blogger_url.strip()
-    )
+def _validate_http_url(
+    value: str,
+    label: str,
+    require_https: bool = False,
+) -> None:
+    """Validate an absolute HTTP(S) URL."""
+    value = (value or "").strip()
 
-    if u.scheme.lower() != "https":
+    if not value:
         raise FacebookError(
-            "invalid Blogger URL: HTTPS is required"
+            f"{label} is empty"
         )
 
     try:
-        hostname = u.hostname
+        parsed = urlparse(value)
     except ValueError:
-        raise FacebookError("invalid Blogger URL: malformed hostname")
-
-    if not hostname or not u.netloc:
         raise FacebookError(
-            "invalid Blogger URL: missing hostname"
+            f"invalid {label}: malformed URL"
         )
 
-    if u.username or u.password:
+    allowed_schemes = {"https"} if require_https else {"http", "https"}
+
+    if parsed.scheme.lower() not in allowed_schemes:
+        required = "HTTPS" if require_https else "HTTP/HTTPS"
+
         raise FacebookError(
-            "invalid Blogger URL: credentials are not allowed"
+            f"invalid {label}: {required} is required"
         )
+
+    try:
+        hostname = parsed.hostname
+    except ValueError:
+        raise FacebookError(
+            f"invalid {label}: malformed hostname"
+        )
+
+    if not hostname or not parsed.netloc:
+        raise FacebookError(
+            f"invalid {label}: missing hostname"
+        )
+
+    if parsed.username or parsed.password:
+        raise FacebookError(
+            f"invalid {label}: credentials are not allowed"
+        )
+
+
+def _validate_blogger_url(blogger_url: str) -> None:
+    """Validate that the supplied URL is a real HTTPS Blogger destination."""
+    _validate_http_url(
+        blogger_url,
+        "Blogger URL",
+        require_https=True,
+    )
+
+    u = urlparse(blogger_url.strip())
 
     if u.fragment:
         raise FacebookError(
             "invalid Blogger URL: fragments are not allowed"
+        )
+
+
+def _validate_source_url(source_url: str) -> None:
+    """Validate that the supplied source URL is a real HTTP(S) URL."""
+    _validate_http_url(
+        source_url,
+        "source URL",
+        require_https=False,
+    )
+
+
+def _validate_lengths(content: GeneratedContent) -> None:
+    """Protect against unexpectedly large generated Facebook fields."""
+    facebook_post = (content.facebook_post or "").strip()
+    facebook_title = (content.facebook_title or "").strip()
+    first_comment_hook = (content.first_comment_hook or "").strip()
+
+    if len(facebook_title) > MAX_FACEBOOK_TITLE_LENGTH:
+        raise FacebookError(
+            "Facebook title is too long"
+        )
+
+    if len(facebook_post) > MAX_FACEBOOK_POST_LENGTH:
+        raise FacebookError(
+            "Facebook content is too long"
+        )
+
+    if len(first_comment_hook) > MAX_FACEBOOK_COMMENT_LENGTH:
+        raise FacebookError(
+            "Facebook first comment is too long"
         )
 
 
@@ -79,6 +145,8 @@ def validate_facebook_content(content: GeneratedContent) -> None:
 
     if not first_comment_hook:
         raise FacebookError("Facebook first comment is empty")
+
+    _validate_lengths(content)
 
     if _contains_url(facebook_post):
         raise FacebookError(
@@ -130,13 +198,11 @@ def build_package(
     source_url = (source_url or "").strip()
     image_path = (image_path or "").strip()
 
-    if not source_url:
-        raise FacebookError("source URL is required")
-
     # ------------------------------------------------------------------
-    # Blogger URL validation
+    # URL validation
     # ------------------------------------------------------------------
     _validate_blogger_url(blogger_url)
+    _validate_source_url(source_url)
 
     if blogger_url.rstrip("/") == source_url.rstrip("/"):
         raise FacebookError("Blogger URL equals the source URL")
@@ -150,16 +216,28 @@ def build_package(
     first_comment_hook = content.first_comment_hook.strip()
 
     if blogger_url in facebook_post:
-        raise FacebookError("Facebook post already contains the Blogger URL")
+        raise FacebookError(
+            "Facebook post already contains the Blogger URL"
+        )
 
     if blogger_url in first_comment_hook:
-        raise FacebookError("Facebook comment already contains the Blogger URL")
+        raise FacebookError(
+            "Facebook comment already contains the Blogger URL"
+        )
 
     # ------------------------------------------------------------------
     # Final promotion package with standard CTA
     # ------------------------------------------------------------------
-    post = f"{facebook_post}\n\n{CTA_LINE}\n{blogger_url}"
-    comment = f"{first_comment_hook} 👇\n{blogger_url}"
+    post = (
+        f"{facebook_post}\n\n"
+        f"{CTA_LINE}\n"
+        f"{blogger_url}"
+    )
+
+    comment = (
+        f"{first_comment_hook} 👇\n"
+        f"{blogger_url}"
+    )
 
     return FacebookPackage(
         title=content.facebook_title.strip(),
