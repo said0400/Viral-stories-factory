@@ -8,7 +8,9 @@ import sys
 class RedactFilter(logging.Filter):
     def __init__(self, secrets: list[str] | None = None) -> None:
         super().__init__()
-        self.secrets = [s for s in (secrets or []) if s]
+        # Sort secrets by length descending so longer tokens are redacted first
+        raw_secrets = [s for s in (secrets or []) if s and len(s) >= 5]
+        self.secrets = sorted(set(raw_secrets), key=len, reverse=True)
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
