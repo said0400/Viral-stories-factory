@@ -22,14 +22,7 @@ from .image_publisher import publish_images
 from .logger import error, log, setup_logging, warn
 from .models import SourceArticle, StoryCache, StoryState
 from .twilio_whatsapp import WhatsAppClient, WhatsAppError
-from .utils import (
-    PoliteFetcher,
-    atomic_write_json,
-    git_commit_and_push,
-    iso,
-    make_story_id,
-    utcnow,
-)
+from .utils import PoliteFetcher, atomic_write_json, git_commit_and_push, iso, make_story_id, utcnow
 
 
 class StoryFailed(Exception):
@@ -42,65 +35,29 @@ def data_uri(path: str) -> str:
     """Last-resort inline image for Blogger when no public URL exists."""
     img = Image.open(path).convert("RGB")
     img.thumbnail((1000, 1000))
-
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=75)
-
-    return (
-        "data:image/jpeg;base64,"
-        + base64.b64encode(buf.getvalue()).decode()
-    )
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 class Factory:
     def __init__(self, cfg: Settings) -> None:
         self.cfg = cfg
         self.dry = cfg.dry_run
-
-        self.work = (
-            dataclasses.replace(
-                cfg,
-                data_dir=cfg.dry_run_dir,
-            )
-            if self.dry
-            else cfg
-        )
-
-        self.hist = H.History(
-            cfg.history_file,
-            cfg.cache_dir,
-            cfg.day_timezone,
-        )
-
+        self.work = dataclasses.replace(cfg, data_dir=cfg.dry_run_dir) if self.dry else cfg
+        self.hist = H.History(cfg.history_file, cfg.cache_dir, cfg.day_timezone)
         self.gem = GeminiClient(cfg)
-
         self.fetcher = PoliteFetcher(
             cfg.user_agent,
             cfg.request_timeout,
             cfg.per_host_delay,
         )
-
-        self.imgs = ImageGenerator(
-            self.work,
-            self.gem,
-        )
-
-        self.blogger = (
-            None
-            if self.dry
-            else BloggerClient(cfg)
-        )
-
+        self.imgs = ImageGenerator(self.work, self.gem)
+        self.blogger = None if self.dry else BloggerClient(cfg)
         self.whatsapp: WhatsAppClient | None = None
+        self.completed = self.partial = self.failed = 0
 
-        self.completed = 0
-        self.partial = 0
-        self.failed = 0
-
-    # ===================================================================
-    # run
-    # ===================================================================
-
+    # =================================================================== run
     def run(self) -> int:
         log(
             "RUN",
@@ -110,24 +67,13 @@ class Factory:
 
         published = self.hist.published_today()
 
-        base = (
-            self.cfg.number_of_stories
-            or self.cfg.max_stories_per_run
-        )
+        base = self.cfg.number_of_stories or self.cfg.max_stories_per_run
 
-        quota = (
-            base
-            if (
-                self.cfg.manual_override
-                or self.dry
-            )
-            else min(
-                base,
-                max(
-                    0,
-                    self.cfg.target_daily_stories - published,
-                ),
-            )
+        quota = base if (
+            self.cfg.manual_override or self.dry
+        ) else min(
+            base,
+            max(0, self.cfg.target_daily_stories - published),
         )
 
         log(
@@ -136,42 +82,27 @@ class Factory:
         )
 
         if quota <= 0:
-            log(
-                "RUN",
-                "daily target reached; nothing to do",
-            )
+            log("RUN", "daily target reached; nothing to do")
             return 0
 
         done = 0
 
-        # ---------------------------------------------------------------
-        # Recovery
-        # ---------------------------------------------------------------
+        # --------------------------------------------------------------- recovery
         if not self.dry:
-            for st in self.hist.resumable(
-                self.cfg.max_story_attempts
-            ):
+            for st in self.hist.resumable(self.cfg.max_story_attempts):
                 if done >= quota:
                     break
 
                 log(
                     "RECOVERY",
-                    f"resuming {st.story_id} "
-                    f"from status={st.status}",
+                    f"resuming {st.story_id} from status={st.status}",
                 )
 
-                done += self._guarded(
-                    st,
-                    resume=True,
-                )
+                done += self._guarded(st, resume=True)
 
-        # ---------------------------------------------------------------
-        # New stories
-        # ---------------------------------------------------------------
+        # --------------------------------------------------------------- discovery
         if done < quota:
-            for art in self._discover_and_select(
-                quota - done
-            ):
+            for art in self._discover_and_select(quota - done):
                 st = StoryState(
                     story_id=make_story_id(
                         art.source_name,
@@ -188,7 +119,6 @@ class Factory:
 
                 if not self.dry:
                     self.hist.upsert(st)
-
                     self.hist.save_cache(
                         st.story_id,
                         StoryCache(article=art),
@@ -210,29 +140,18 @@ class Factory:
 
         return 0
 
-    # ===================================================================
-    # discovery
-    # ===================================================================
-
-    def _discover_and_select(
-        self,
-        quota: int,
-    ) -> list[SourceArticle]:
+    # =================================================================== discovery
+    def _discover_and_select(self, quota: int) -> list[SourceArticle]:
         cands: list[SourceArticle] = []
 
-        for sd in src_mod.load_sources(
-            self.cfg.sources_override_file
-        ):
+        for sd in src_mod.load_sources(self.cfg.sources_override_file):
             if not sd.enabled:
                 continue
 
             try:
-                cands += src_mod.discover(
-                    sd,
-                    self.fetcher,
-                )
+                cands += src_mod.discover(sd, self.fetcher)
             except Exception as exc:
-                # One broken source must never stop the entire run.
+                # One source never stops the system.
                 warn(
                     "DISCOVERY",
                     f"{sd.name} failed: {type(exc).__name__}",
@@ -243,27 +162,17 @@ class Factory:
             f"Found {len(cands)} candidate articles",
         )
 
-        # ---------------------------------------------------------------
-        # Layer 1 + 2 deduplication
-        # ---------------------------------------------------------------
         seen: set[str] = set()
         fresh: list[SourceArticle] = []
 
         for c in cands:
-            if not c.normalized_url:
-                continue
-
-            if c.normalized_url in seen:
-                continue
-
-            if self.hist.has_url(
-                c.normalized_url
-            ):
-                continue
-
-            if self.hist.similar_title(
-                c.source_name,
-                c.original_title,
+            if (
+                c.normalized_url in seen
+                or self.hist.has_url(c.normalized_url)
+                or self.hist.similar_title(
+                    c.source_name,
+                    c.original_title,
+                )
             ):
                 continue
 
@@ -272,126 +181,67 @@ class Factory:
 
         log(
             "DEDUP",
-            f"Removed {len(cands) - len(fresh)} "
-            "duplicates (URL / source+title)",
+            f"Removed {len(cands) - len(fresh)} duplicates "
+            f"(URL / source+title)",
         )
 
         if not fresh:
             return []
 
-        # ---------------------------------------------------------------
-        # Round-robin across sources, newest first.
-        # ---------------------------------------------------------------
-        by_src: dict[
-            str,
-            list[SourceArticle],
-        ] = {}
+        # Round-robin across sources, newest first, capped for cost.
+        by_src: dict[str, list[SourceArticle]] = {}
 
         for c in sorted(
             fresh,
-            key=lambda a: (
-                a.publication_date
-                or a.discovered_at
-            ),
+            key=lambda a: a.publication_date or a.discovered_at,
             reverse=True,
         ):
-            by_src.setdefault(
-                c.source_name,
-                [],
-            ).append(c)
+            by_src.setdefault(c.source_name, []).append(c)
 
         batch: list[SourceArticle] = []
 
         while (
-            len(batch)
-            < self.cfg.max_candidates_for_triage
+            len(batch) < self.cfg.max_candidates_for_triage
             and any(by_src.values())
         ):
             for k in list(by_src):
                 if (
                     by_src[k]
-                    and len(batch)
-                    < self.cfg.max_candidates_for_triage
+                    and len(batch) < self.cfg.max_candidates_for_triage
                 ):
-                    batch.append(
-                        by_src[k].pop(0)
-                    )
+                    batch.append(by_src[k].pop(0))
 
-        if not batch:
-            return []
-
-        # ---------------------------------------------------------------
-        # Gemini triage
-        # ---------------------------------------------------------------
         try:
             items = editorial.triage(
                 self.gem,
                 batch,
                 self.hist.recent_titles(),
             )
-        except (
-            GeminiError,
-            ValueError,
-            IndexError,
-            TypeError,
-        ) as exc:
-            error(
-                "SELECTION",
-                f"triage failed: {exc}",
-            )
+        except GeminiError as exc:
+            error("SELECTION", f"triage failed: {exc}")
             return []
 
-        cutoff = (
-            utcnow()
-            - timedelta(
-                hours=self.cfg.max_source_age_hours
-            )
+        cutoff = utcnow() - timedelta(
+            hours=self.cfg.max_source_age_hours,
         )
 
         rejected: dict[str, int] = {}
-        picked: list[
-            tuple[float, SourceArticle]
-        ] = []
-
+        picked: list[tuple[float, SourceArticle]] = []
         seen_dupe: set[int] = set()
 
-        # ---------------------------------------------------------------
-        # Validate Gemini triage indexes before indexing batch.
-        # ---------------------------------------------------------------
-        valid_items = []
-
-        for it in items:
-            if (
-                it.index < 0
-                or it.index >= len(batch)
-            ):
-                rejected["invalid triage index"] = (
-                    rejected.get(
-                        "invalid triage index",
-                        0,
-                    )
-                    + 1
-                )
-                continue
-
-            if (
-                it.duplicate_of < -1
-                or it.duplicate_of >= len(batch)
-            ):
-                # Invalid duplicate reference is treated as no duplicate.
-                it.duplicate_of = -1
-
-            valid_items.append(it)
-
-        # Higher-ranked candidates are processed first so that when Gemini
-        # marks two stories as duplicates, the better candidate wins.
         for it in sorted(
-            valid_items,
+            items,
             key=editorial.rank_score,
             reverse=True,
         ):
-            c = batch[it.index]
+            # Defensive protection against malformed Gemini indices.
+            if it.index < 0 or it.index >= len(batch):
+                rejected["invalid triage index"] = (
+                    rejected.get("invalid triage index", 0) + 1
+                )
+                continue
 
+            c = batch[it.index]
             reason = ""
 
             if not it.suitable:
@@ -406,10 +256,7 @@ class Factory:
             ):
                 reason = "same event as a better candidate"
 
-            elif (
-                it.viral_score
-                < self.cfg.min_viral_score
-            ):
+            elif it.viral_score < self.cfg.min_viral_score:
                 reason = "below quality threshold"
 
             elif (
@@ -418,8 +265,7 @@ class Factory:
             ):
                 if it.is_evergreen:
                     c.age_exception = (
-                        "older than MAX_SOURCE_AGE_HOURS "
-                        "but evergreen"
+                        "older than MAX_SOURCE_AGE_HOURS but evergreen"
                     )
 
                     log(
@@ -432,18 +278,13 @@ class Factory:
                     reason = "too old"
 
             if reason:
-                rejected[reason] = (
-                    rejected.get(reason, 0)
-                    + 1
-                )
+                rejected[reason] = rejected.get(reason, 0) + 1
                 continue
 
             seen_dupe.add(it.index)
 
             if it.duplicate_of >= 0:
-                seen_dupe.add(
-                    it.duplicate_of
-                )
+                seen_dupe.add(it.duplicate_of)
 
             picked.append(
                 (
@@ -452,40 +293,17 @@ class Factory:
                 )
             )
 
-        # ---------------------------------------------------------------
-        # Full article extraction + validation
-        # ---------------------------------------------------------------
         valid: list[SourceArticle] = []
 
         for _, c in picked[: quota * 3]:
-            try:
-                full = extractor.extract_article(
-                    c,
-                    self.fetcher,
-                )
-            except Exception as exc:
-                rejected["extraction failed"] = (
-                    rejected.get(
-                        "extraction failed",
-                        0,
-                    )
-                    + 1
-                )
-
-                warn(
-                    "EXTRACTION",
-                    f"{c.original_title[:60]} "
-                    f"failed: {type(exc).__name__}",
-                )
-                continue
+            full = extractor.extract_article(
+                c,
+                self.fetcher,
+            )
 
             if not full:
                 rejected["extraction failed"] = (
-                    rejected.get(
-                        "extraction failed",
-                        0,
-                    )
-                    + 1
+                    rejected.get("extraction failed", 0) + 1
                 )
                 continue
 
@@ -497,25 +315,13 @@ class Factory:
             )
 
             if not ok:
-                rejected[why] = (
-                    rejected.get(why, 0)
-                    + 1
-                )
+                rejected[why] = rejected.get(why, 0) + 1
                 continue
 
-            # Canonical URL may reveal a duplicate that was not visible
-            # before full extraction.
-            if self.hist.has_url(
-                full.normalized_url
-            ):
-                rejected[
-                    "duplicate canonical url"
-                ] = (
-                    rejected.get(
-                        "duplicate canonical url",
-                        0,
-                    )
-                    + 1
+            # Canonical URL may reveal a duplicate.
+            if self.hist.has_url(full.normalized_url):
+                rejected["duplicate canonical url"] = (
+                    rejected.get("duplicate canonical url", 0) + 1
                 )
                 continue
 
@@ -528,9 +334,8 @@ class Factory:
             ""
             if len(valid) >= quota
             else (
-                f"only {len(valid)} story(ies) met "
-                "the quality bar; quality is never "
-                "lowered to fill the quota"
+                f"only {len(valid)} story(ies) met the quality bar; "
+                f"quality is never lowered to fill the quota"
             )
         )
 
@@ -544,10 +349,7 @@ class Factory:
 
         return valid
 
-    # ===================================================================
-    # guarded story
-    # ===================================================================
-
+    # =================================================================== guarded story
     def _guarded(
         self,
         st: StoryState,
@@ -570,7 +372,6 @@ class Factory:
                 tag,
                 f"{exc.stage}: {exc}",
             )
-
             self._record_failure(
                 st,
                 exc.stage,
@@ -578,12 +379,11 @@ class Factory:
             )
 
         except Exception as exc:
-            # Never let one story stop the rest of the run.
+            # Never let one story stop the rest.
             error(
                 tag,
                 f"unexpected {type(exc).__name__}",
             )
-
             self._record_failure(
                 st,
                 "unexpected",
@@ -591,7 +391,6 @@ class Factory:
             )
 
         self.failed += 1
-
         return 0
 
     def _record_failure(
@@ -612,10 +411,7 @@ class Factory:
 
         self.hist.upsert(st)
 
-    # ===================================================================
-    # pipeline
-    # ===================================================================
-
+    # =================================================================== pipeline
     def _process(
         self,
         st: StoryState,
@@ -626,9 +422,7 @@ class Factory:
         cache = (
             StoryCache(article=article)
             if self.dry
-            else self.hist.load_cache(
-                st.story_id
-            )
+            else self.hist.load_cache(st.story_id)
         )
 
         article = article or cache.article
@@ -639,9 +433,7 @@ class Factory:
                 "no cached article to resume from",
             )
 
-        # ---------------------------------------------------------------
-        # 1. Original Arabic content + fact check
-        # ---------------------------------------------------------------
+        # ---- 1. original Arabic content (+ fact check)
         if not cache.content:
             log(
                 tag,
@@ -653,31 +445,23 @@ class Factory:
                     self.gem,
                     article,
                     self.hist.recent_titles(),
-                    lambda t: (
-                        self.hist.any_similar_published_title(t)
-                    ),
+                    lambda t: self.hist.any_similar_published_title(t),
                 )
 
-            except (
-                GeminiError,
-                ValueError,
-            ) as exc:
+            except (GeminiError, ValueError) as exc:
                 raise StoryFailed(
                     "generate",
                     str(exc),
                 ) from exc
 
             st.generated_at = iso()
-            st.blogger_title = (
-                cache.content.blogger_title
-            )
+            st.blogger_title = cache.content.blogger_title
 
             if not self.dry:
                 self.hist.set_status(
                     st,
                     H.GENERATED,
                 )
-
                 self.hist.save_cache(
                     st.story_id,
                     cache,
@@ -685,57 +469,41 @@ class Factory:
 
         content = cache.content
 
-        # ---------------------------------------------------------------
-        # 2. Visual analysis + AI image
-        # ---------------------------------------------------------------
+        # ---- 2. visual analysis + new AI image
         need_image = (
             not self.dry
             or self.cfg.dry_run_generate_images
         )
 
-        if (
-            need_image
-            and not (
-                cache.image
-                and Path(
-                    cache.image.path
-                ).exists()
-            )
+        if need_image and not (
+            cache.image
+            and Path(cache.image.path).exists()
         ):
             try:
                 if not cache.visual:
-                    ref = (
-                        visual_analyzer.acquire_source_image(
-                            article,
-                            self.fetcher,
-                        )
+                    ref = visual_analyzer.acquire_source_image(
+                        article,
+                        self.fetcher,
                     )
 
                     log(
                         "VISUAL",
-                        (
-                            "Reference image found"
-                            if ref
-                            else "No reference image available"
-                        ),
+                        "Reference image found"
+                        if ref
+                        else "No reference image available",
                     )
 
                     cache.visual = visual_analyzer.analyze(
                         self.gem,
                         article,
-                        (
-                            (ref[0], ref[1])
-                            if ref
-                            else None
-                        ),
+                        (ref[0], ref[1]) if ref else None,
                     )
 
                     log(
                         "VISUAL",
                         f"Subject type: "
                         f"{cache.visual.subject_type}; "
-                        f"people="
-                        f"{cache.visual.contains_real_people}",
+                        f"people={cache.visual.contains_real_people}",
                     )
 
                     self._ref = ref
@@ -759,33 +527,14 @@ class Factory:
                     title=content.blogger_title,
                     article_scene=content.article_scene_idea,
                     facebook_scene=content.facebook_scene_idea,
-                    source_ref=(
-                        (ref[0], ref[1])
-                        if ref
-                        else None
-                    ),
-                    source_url=(
-                        ref[2]
-                        if ref
-                        else ""
-                    ),
-                    source_sha=(
-                        ref[3]
-                        if ref
-                        else ""
-                    ),
-                    source_ahash=(
-                        ref[4]
-                        if ref
-                        else ""
-                    ),
+                    source_ref=(ref[0], ref[1]) if ref else None,
+                    source_url=ref[2] if ref else "",
+                    source_sha=ref[3] if ref else "",
+                    source_ahash=ref[4] if ref else "",
                     known=self.hist.image_hashes(),
                 )
 
-            except (
-                ImageGenError,
-                GeminiError,
-            ) as exc:
+            except (ImageGenError, GeminiError) as exc:
                 st.image_status = "failed"
 
                 if not self.dry:
@@ -803,56 +552,32 @@ class Factory:
 
                 warn(
                     tag,
-                    "image failed; continuing without "
-                    "image (IMAGE_REQUIRED=false)",
+                    "image failed; continuing without image "
+                    "(IMAGE_REQUIRED=false)",
                 )
 
             else:
                 st.image_status = "generated"
                 st.image_generated_at = iso()
-
-                st.subject_type = (
-                    cache.visual.subject_type
-                )
-
-                st.identity_confidence = (
-                    cache.image.identity_confidence
-                )
-
-                st.source_image_url = (
-                    cache.image.source_image_url
-                )
-
-                st.source_image_hash = (
-                    cache.image.source_image_hash
-                )
-
-                st.generated_image_path = (
-                    cache.image.path
-                )
-
-                st.generated_image_hash = (
-                    cache.image.generated_hash
-                )
-
-                st.generated_image_ahash = (
-                    cache.image.generated_ahash
-                )
+                st.subject_type = cache.visual.subject_type
+                st.identity_confidence = cache.image.identity_confidence
+                st.source_image_url = cache.image.source_image_url
+                st.source_image_hash = cache.image.source_image_hash
+                st.generated_image_path = cache.image.path
+                st.generated_image_hash = cache.image.generated_hash
+                st.generated_image_ahash = cache.image.generated_ahash
 
                 if not self.dry:
                     self.hist.set_status(
                         st,
                         H.IMAGE_GENERATED,
                     )
-
                     self.hist.save_cache(
                         st.story_id,
                         cache,
                     )
 
-        # ---------------------------------------------------------------
-        # Dry run ends here.
-        # ---------------------------------------------------------------
+        # ---------------------------------------------------------------- dry run
         if self.dry:
             self._write_dry(
                 st,
@@ -867,13 +592,7 @@ class Factory:
 
             return False
 
-        # ---------------------------------------------------------------
-        # 3. Blogger
-        #
-        # Important recovery rule:
-        # If blogger_url already exists, Blogger is NEVER called again.
-        # This is what makes whatsapp_failed recovery idempotent.
-        # ---------------------------------------------------------------
+        # ---- 3. Blogger
         if not st.blogger_url:
             self._publish_blogger(
                 st,
@@ -881,11 +600,7 @@ class Factory:
                 article,
             )
 
-        # ---------------------------------------------------------------
-        # 4. Facebook package
-        #
-        # It can only be generated after a REAL Blogger URL exists.
-        # ---------------------------------------------------------------
+        # ---- 4. Facebook package (only with the REAL Blogger URL)
         if (
             st.facebook_status != "ready"
             or not cache.facebook
@@ -896,9 +611,7 @@ class Factory:
                 article,
             )
 
-        # ---------------------------------------------------------------
-        # 5. WhatsApp
-        # ---------------------------------------------------------------
+        # ---- 5. WhatsApp
         if st.whatsapp_status != "sent":
             self._whatsapp(
                 st,
@@ -906,9 +619,7 @@ class Factory:
                 article,
             )
 
-        # ---------------------------------------------------------------
-        # 6. Final validation
-        # ---------------------------------------------------------------
+        # ---- 6. final validation
         problems = self._final_checks(
             st,
             cache,
@@ -917,8 +628,7 @@ class Factory:
         if problems:
             warn(
                 tag,
-                "NOT completed: "
-                + "; ".join(problems),
+                "NOT completed: " + "; ".join(problems),
             )
 
             self.partial += 1
@@ -948,10 +658,7 @@ class Factory:
 
         return True
 
-    # ===================================================================
-    # stages
-    # ===================================================================
-
+    # ------------------------------------------------------------------ stages
     def _publish_blogger(
         self,
         st: StoryState,
@@ -959,29 +666,17 @@ class Factory:
         art: SourceArticle,
     ) -> None:
         tag = f"STORY {st.story_id[:8]}"
-
         content = cache.content
         img = cache.image
 
-        if not content:
+        # Validation before publishing.
+        if (
+            not content.blogger_title.strip()
+            or len(content.blogger_html) < 200
+        ):
             raise StoryFailed(
                 "validate",
-                "content missing",
-            )
-
-        # ---------------------------------------------------------------
-        # Validation before publishing
-        # ---------------------------------------------------------------
-        if not content.blogger_title.strip():
-            raise StoryFailed(
-                "validate",
-                "title invalid",
-            )
-
-        if len(content.blogger_html) < 200:
-            raise StoryFailed(
-                "validate",
-                "content invalid",
+                "title/content invalid",
             )
 
         if (
@@ -998,22 +693,13 @@ class Factory:
 
         image_url = ""
 
-        if (
-            img
-            and Path(img.path).exists()
-        ):
-            paths = [
-                p
-                for p in (
-                    img.path,
-                    img.facebook_path,
-                )
-                if p
-            ]
-
+        if img and Path(img.path).exists():
             urls = publish_images(
                 self.cfg,
-                paths,
+                [
+                    img.path,
+                    img.facebook_path,
+                ],
                 st.story_id,
             )
 
@@ -1050,12 +736,6 @@ class Factory:
             "BLOGGER",
             "Publishing...",
         )
-
-        if self.blogger is None:
-            raise StoryFailed(
-                "blogger",
-                "Blogger client is unavailable in live mode",
-            )
 
         try:
             res = self.blogger.publish(
@@ -1104,47 +784,11 @@ class Factory:
         cache: StoryCache,
         art: SourceArticle,
     ) -> None:
-        if not st.blogger_url:
-            st.facebook_status = "failed"
-
-            self.hist.set_status(
-                st,
-                st.status,
-                error="facebook: missing Blogger URL",
-            )
-
-            warn(
-                "FACEBOOK",
-                "package skipped: Blogger URL missing",
-            )
-
-            return
-
-        if not cache.content:
-            st.facebook_status = "failed"
-
-            self.hist.set_status(
-                st,
-                st.status,
-                error="facebook: content missing",
-            )
-
-            warn(
-                "FACEBOOK",
-                "package skipped: content missing",
-            )
-
-            return
-
         try:
             img_path = (
-                (
-                    cache.image.facebook_path
-                    or cache.image.path
-                )
-                if cache.image
-                else ""
-            )
+                cache.image.facebook_path
+                or cache.image.path
+            ) if cache.image else ""
 
             cache.facebook = build_package(
                 cache.content,
@@ -1156,8 +800,6 @@ class Factory:
         except FacebookError as exc:
             st.facebook_status = "failed"
 
-            # Preserve the current publishing state so the story remains
-            # resumable. Blogger URL is intentionally kept.
             self.hist.set_status(
                 st,
                 st.status,
@@ -1167,7 +809,7 @@ class Factory:
             warn(
                 "FACEBOOK",
                 f"package failed: {exc} "
-                "(Blogger URL kept)",
+                f"(Blogger URL kept)",
             )
 
             return
@@ -1198,44 +840,30 @@ class Factory:
         if not cache.facebook:
             return
 
-        if not st.blogger_url:
-            warn(
-                "WHATSAPP",
-                "skipped: Blogger URL missing",
-            )
-            return
-
         try:
             if self.whatsapp is None:
                 self.whatsapp = WhatsAppClient(
-                    self.cfg
+                    self.cfg,
                 )
 
             img = cache.image
             url = ""
 
             if img:
-                paths = [
-                    p
-                    for p in (
+                urls = publish_images(
+                    self.cfg,
+                    [
                         img.facebook_path
-                        or img.path,
-                    )
-                    if p
-                ]
+                        or img.path
+                    ],
+                    st.story_id,
+                    wait_seconds=60,
+                )
 
-                if paths:
-                    urls = publish_images(
-                        self.cfg,
-                        paths,
-                        st.story_id,
-                        wait_seconds=60,
-                    )
-
-                    url = next(
-                        iter(urls.values()),
-                        "",
-                    )
+                url = next(
+                    iter(urls.values()),
+                    "",
+                )
 
             res = self.whatsapp.send_package(
                 title=cache.content.blogger_title,
@@ -1244,10 +872,7 @@ class Factory:
                 source_url=art.original_url,
                 fb=cache.facebook,
                 image_public_url=url,
-                status=(
-                    "blogger_published / "
-                    "facebook_ready"
-                ),
+                status="blogger_published / facebook_ready",
             )
 
         except WhatsAppError as exc:
@@ -1262,13 +887,12 @@ class Factory:
             warn(
                 "WHATSAPP",
                 f"failed: {exc} "
-                "(Blogger post kept; will resend next run)",
+                f"(Blogger post kept; will resend next run)",
             )
 
             return
 
         st.whatsapp_status = "sent"
-
         st.whatsapp_message_id = (
             res.message_ids[0]
             if res.message_ids
@@ -1294,37 +918,24 @@ class Factory:
 
         if (
             not st.blogger_post_id
-            or not st.blogger_url
-            or not st.blogger_url.startswith(
-                "https://"
-            )
+            or not st.blogger_url.startswith("https://")
         ):
-            problems.append(
-                "blogger_url_invalid"
-            )
+            problems.append("blogger_url_invalid")
 
         if not cache.content:
-            problems.append(
-                "content_invalid"
-            )
+            problems.append("content_invalid")
 
         if (
             self.cfg.image_required
             and st.image_status != "generated"
         ):
-            problems.append(
-                "image_invalid"
-            )
+            problems.append("image_invalid")
 
         if not cache.facebook:
-            problems.append(
-                "facebook_package_invalid"
-            )
+            problems.append("facebook_package_invalid")
 
         if st.whatsapp_status != "sent":
-            problems.append(
-                "whatsapp_not_sent"
-            )
+            problems.append("whatsapp_not_sent")
 
         return problems
 
@@ -1333,10 +944,7 @@ class Factory:
         st: StoryState,
         cache: StoryCache,
     ) -> None:
-        out = (
-            self.cfg.dry_run_dir
-            / f"{st.story_id}.json"
-        )
+        out = self.cfg.dry_run_dir / f"{st.story_id}.json"
 
         atomic_write_json(
             out,
@@ -1349,15 +957,12 @@ class Factory:
         )
 
 
-# =======================================================================
-# CLI
-# =======================================================================
-
+# ======================================================================= CLI
 def parse_args(
     argv: list[str] | None = None,
 ) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="Viral Stories Factory"
+        description="Viral Stories Factory",
     )
 
     ap.add_argument(
@@ -1402,14 +1007,7 @@ def main(
             dry_run=args.dry_run,
         )
 
-    if args.stories is not None:
-        if args.stories < 1:
-            error(
-                "CONFIG",
-                "--stories must be >= 1",
-            )
-            return 2
-
+    if args.stories:
         cfg = dataclasses.replace(
             cfg,
             number_of_stories=args.stories,
@@ -1422,11 +1020,11 @@ def main(
         )
 
     setup_logging(
-        cfg.secret_values()
+        cfg.secret_values(),
     )
 
     problems = cfg.validate(
-        need_publish=not cfg.dry_run
+        need_publish=not cfg.dry_run,
     )
 
     if problems:
@@ -1435,7 +1033,6 @@ def main(
                 "CONFIG",
                 p,
             )
-
         return 2
 
     return Factory(cfg).run()
