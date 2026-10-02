@@ -1,237 +1,135 @@
-"""All Gemini traffic lives here. Swap models via GEMINI_MODEL / GEMINI_IMAGE_MODEL."""
+# src/gemini_client.py
+"""
+Wrapper around Google GenAI SDK (`google-genai`).
+Encapsulates initialization, retry logic, timeout handling, fallback models, and type-safe JSON extraction.
+"""
+
 from __future__ import annotations
 
+import io
 import time
-from typing import TypeVar
+from typing import Any, TypeVar
 
-from google import genai
-from google.genai import errors as genai_errors
-from google.genai import types
-from pydantic import BaseModel, ValidationError
+from PIL import Image
+from pydantic import BaseModel
 
-from . import logger
-from .config import Settings
-
+from src.config import Settings
+from src.logger import logger
 
 T = TypeVar("T", bound=BaseModel)
 
 
-STRICT_SUFFIX = (
-    "\n\nIMPORTANT: Reply with ONE valid JSON object that exactly matches the schema. "
-    "No markdown fences, no commentary, no trailing text."
-)
-
-
 class GeminiError(Exception):
-    pass
-
-
-class ImageGenError(GeminiError):
-    pass
+    """Base exception for Gemini client failures."""
 
 
 class GeminiClient:
+
     def __init__(self, cfg: Settings) -> None:
         self.cfg = cfg
+        self._client: Any = None
+        self._init_client()
 
-        if not cfg.gemini_api_key:
-            raise GeminiError(
-                "GEMINI_API_KEY is missing"
-            )
+    def _init_client(self) -> None:
+        if not self.cfg.gemini_api_key:
+            return
+        try:
+            from google import genai
 
-        self.client = genai.Client(
-            api_key=cfg.gemini_api_key
-        )
+            self._client = genai.Client(api_key=self.cfg.gemini_api_key)
+        except Exception as e:
+            logger.error("GEMINI", f"Failed to initialize google-genai client: {e}")
+            self._client = None
 
-        if cfg.image_api_key:
-            self.image_client = (
-                self.client
-                if cfg.image_api_key == cfg.gemini_api_key
-                else genai.Client(
-                    api_key=cfg.image_api_key
-                )
-            )
-        else:
-            self.image_client = self.client
+    def is_configured(self) -> bool:
+        return self._client is not None
 
-    # ------------------------------------------------------------------
-    # helpers
-    # ------------------------------------------------------------------
-    def _sleep(self, attempt: int, *, minimum: float = 2.0) -> None:
-        """
-        Exponential backoff.
-
-        attempt=0 -> max(minimum, 2) seconds
-        attempt=1 -> max(minimum, 4) seconds
-        ...
-        capped at 60 seconds.
-
-        For rate limits (429), callers may pass minimum=15.
-        """
-        delay = min(
-            60.0,
-            max(
-                float(minimum),
-                2.0 * (2 ** attempt),
-            ),
-        )
-        time.sleep(delay)
-
-    @staticmethod
-    def _retryable(exc: Exception) -> bool:
-        """Return True only for transient Gemini/API/network failures."""
-        if isinstance(exc, genai_errors.ServerError):
-            return True
-
+    def _retryable(self, exc: Exception) -> bool:
+        msg = str(exc).lower()
         code = getattr(exc, "code", None)
-        if code in (408, 429, 500, 502, 503, 504):
+        status = getattr(exc, "status_code", None)
+        if code in (429, 500, 502, 503, 504) or status in (429, 500, 502, 503, 504):
             return True
-
-        # Network-ish failures sometimes wrap as generic exceptions.
-        name = type(exc).__name__
-        if name in {
-            "TimeoutError",
-            "ConnectError",
-            "ReadTimeout",
-            "ConnectTimeout",
-            "ConnectionError",
-            "RemoteProtocolError",
-        }:
-            return True
-
+        for keyword in ("429", "500", "502", "503", "504", "quota", "resource_exhausted", "unavailable", "overloaded", "rate limit"):
+            if keyword in msg:
+                return True
         return False
 
-    @staticmethod
-    def _is_rate_limited(exc: Exception) -> bool:
-        return getattr(exc, "code", None) == 429
-
-    @staticmethod
-    def _clean_json_response(raw: str) -> str:
-        """Remove accidental markdown fences without changing the JSON itself."""
-        raw = (raw or "").strip()
-
-        if not raw:
-            return ""
-
-        if raw.startswith("```"):
-            lines = raw.splitlines()
-
-            if lines:
-                lines = lines[1:]
-
-            if lines and lines[-1].strip() == "```":
-                lines = lines[:-1]
-
-            raw = "\n".join(lines).strip()
-
-            if raw.lower().startswith("json"):
-                raw = raw[4:].lstrip()
-
-        return raw
-
-    @staticmethod
-    def _extract_image_from_response(resp) -> tuple[bytes, str] | None:
-        """
-        Extract the first inline image from a GenerateContent response.
-
-        Supports candidates/content.parts and response.parts.
-        MIME validation is intentionally left to image_generator.
-        """
-        for cand in getattr(resp, "candidates", None) or []:
-            content = getattr(cand, "content", None)
-            parts = (
-                getattr(content, "parts", None)
-                if content
-                else None
-            ) or []
-
-            for part in parts:
-                inline = getattr(part, "inline_data", None)
-                if inline is None:
-                    continue
-
-                data = getattr(inline, "data", None)
-                if data:
-                    mime = (
-                        getattr(inline, "mime_type", None)
-                        or "image/png"
-                    )
-                    return data, mime
-
-        for part in getattr(resp, "parts", None) or []:
-            inline = getattr(part, "inline_data", None)
-            if inline is None:
-                continue
-
-            data = getattr(inline, "data", None)
-            if data:
-                mime = (
-                    getattr(inline, "mime_type", None)
-                    or "image/png"
-                )
-                return data, mime
-
-        return None
-
-    def _image_config(
+    def _generate_json_model(
         self,
-        aspect_ratio: str | None,
+        model: str,
+        prompt: str,
+        schema: type[T],
         *,
-        use_aspect: bool,
-    ) -> types.GenerateContentConfig:
-        """
-        Build image generation config.
+        images: list[tuple[bytes, str]] | None = None,
+        system: str | None = None,
+        temperature: float = 0.7,
+        tag: str = "GEMINI",
+    ) -> T:
+        if not self._client:
+            raise GeminiError("Gemini client is not configured (missing GEMINI_API_KEY)")
 
-        Both shapes are kept because different google-genai / model
-        combinations accept different knobs:
+        from google.genai import types
 
-        1) image_config=types.ImageConfig(aspect_ratio=...)
-        2) response_format={"image": {"aspect_ratio": ...}}
+        contents: list[Any] = []
 
-        If aspect ratio cannot be applied, fall back to IMAGE-only config.
-        """
-        timeout_ms = self.cfg.image_request_timeout * 1000
+        if images:
+            for img_bytes, mime_type in images:
+                try:
+                    part = types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
+                    contents.append(part)
+                except Exception as e:
+                    logger.warn(tag, f"Failed to convert image bytes for Gemini prompt: {e}")
 
-        if use_aspect and aspect_ratio:
+        contents.append(prompt)
+
+        config_kwargs: dict[str, Any] = {
+            "response_mime_type": "application/json",
+            "response_schema": schema,
+            "temperature": temperature,
+        }
+        if system:
+            config_kwargs["system_instruction"] = system
+
+        config = types.GenerateContentConfig(**config_kwargs)
+
+        backoffs = [2.0, 5.0, 10.0, 20.0]
+        max_attempts = len(backoffs) + 1
+        last_exc: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
             try:
-                image_cfg = types.ImageConfig(
-                    aspect_ratio=aspect_ratio,
+                response = self._client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=config,
                 )
-                return types.GenerateContentConfig(
-                    response_modalities=["IMAGE"],
-                    image_config=image_cfg,
-                    http_options=types.HttpOptions(
-                        timeout=timeout_ms,
-                    ),
+
+                parsed = getattr(response, "parsed", None)
+                if parsed is not None and isinstance(parsed, schema):
+                    return parsed
+
+                text = getattr(response, "text", "") or ""
+                if not text:
+                    raise GeminiError("Empty response text from Gemini API")
+
+                return schema.model_validate_json(text)
+
+            except Exception as e:
+                last_exc = e
+                if not self._retryable(e) or attempt == max_attempts:
+                    logger.error(tag, f"API error on {model} (attempt {attempt}/{max_attempts}): {e}")
+                    raise GeminiError(f"API error on {model}: {e}") from e
+
+                delay = backoffs[attempt - 1]
+                logger.warn(
+                    tag,
+                    f"API error {e} on {model} (attempt {attempt}/{max_attempts}), retrying in {delay}s...",
                 )
-            except (TypeError, ValueError, AttributeError):
-                pass
+                time.sleep(delay)
 
-            try:
-                return types.GenerateContentConfig(
-                    response_modalities=["IMAGE"],
-                    response_format={
-                        "image": {
-                            "aspect_ratio": aspect_ratio,
-                        }
-                    },
-                    http_options=types.HttpOptions(
-                        timeout=timeout_ms,
-                    ),
-                )
-            except (TypeError, ValueError, AttributeError):
-                pass
+        raise GeminiError(f"Failed to generate valid JSON from model {model}") from last_exc
 
-        return types.GenerateContentConfig(
-            response_modalities=["IMAGE"],
-            http_options=types.HttpOptions(
-                timeout=timeout_ms,
-            ),
-        )
-
-    # ------------------------------------------------------------------
-    # JSON
-    # ------------------------------------------------------------------
     def generate_json(
         self,
         prompt: str,
@@ -243,317 +141,115 @@ class GeminiClient:
         tag: str = "GEMINI",
     ) -> T:
         """
-        Structured output with validation.
-
-        Retry policy:
-        - ValidationError / invalid JSON / empty body: retry with stricter
-          instruction and lower temperature (may recover).
-        - Empty response is retried at most ONCE (often safety/token; hammering
-          rarely helps).
-        - Transient API/network errors: retry with backoff (429 minimum 15s).
-        - Non-retryable API errors and unexpected programming errors: fail fast.
+        Generates structured JSON output validated against a Pydantic schema.
+        Falls back to fallback model if primary model is overloaded/unavailable (503/429/500).
         """
-        parts: list = [
-            types.Part.from_bytes(
-                data=b,
-                mime_type=m,
-            )
-            for b, m in (images or [])
-        ]
+        models = [self.cfg.gemini_model]
+        fb = (self.cfg.gemini_fallback_model or "").strip()
+        if fb and fb not in models:
+            models.append(fb)
 
-        last: Exception | None = None
-        timeout_ms = self.cfg.llm_timeout * 1000
-        empty_retries_used = 0
+        last_err: GeminiError | None = None
 
-        for attempt in range(self.cfg.max_retries + 1):
-            text_prompt = prompt + (
-                STRICT_SUFFIX if attempt >= 1 else ""
-            )
-
-            config = types.GenerateContentConfig(
-                system_instruction=system,
-                response_mime_type="application/json",
-                response_json_schema=schema.model_json_schema(),
-                temperature=max(
-                    0.0,
-                    temperature - (0.2 * attempt),
-                ),
-                http_options=types.HttpOptions(
-                    timeout=timeout_ms,
-                ),
-            )
-
+        for i, m in enumerate(models):
             try:
-                resp = self.client.models.generate_content(
-                    model=self.cfg.gemini_model,
-                    contents=[
-                        *parts,
-                        text_prompt,
-                    ],
-                    config=config,
+                return self._generate_json_model(
+                    model=m,
+                    prompt=prompt,
+                    schema=schema,
+                    images=images,
+                    system=system,
+                    temperature=temperature,
+                    tag=tag,
                 )
-
-                raw = self._clean_json_response(
-                    getattr(resp, "text", "")
-                )
-
-                if not raw:
-                    raise GeminiError(
-                        "empty response "
-                        "(possible safety block or token limit)"
-                    )
-
-                return schema.model_validate_json(raw)
-
-            except ValidationError as exc:
-                last = exc
-                logger.warn(
-                    tag,
-                    "invalid structured output "
-                    f"(attempt {attempt + 1}): "
-                    f"{type(exc).__name__}",
-                )
-                # Recoverable: stricter JSON instruction on next loop.
-
             except GeminiError as exc:
-                last = exc
-                msg = str(exc).lower()
-                is_empty = "empty response" in msg
-
-                logger.warn(
-                    tag,
-                    "invalid JSON/response "
-                    f"(attempt {attempt + 1}): "
-                    f"{type(exc).__name__}",
-                )
-
-                if is_empty:
-                    empty_retries_used += 1
-                    # Safety/empty rarely heals by repeating the same call.
-                    if empty_retries_used > 1:
-                        raise GeminiError(
-                            "empty/safety response persisted after retry"
-                        ) from exc
-
-            except genai_errors.APIError as exc:
-                last = exc
-                code = getattr(exc, "code", "?")
-
-                if not self._retryable(exc):
-                    raise GeminiError(
-                        f"non-retryable API error {code}"
-                    ) from exc
-
-                logger.warn(
-                    tag,
-                    f"API error {code} "
-                    f"(attempt {attempt + 1})",
-                )
-
-                if attempt >= self.cfg.max_retries:
-                    raise GeminiError(
-                        f"API error {code} after retries"
-                    ) from exc
-
-                self._sleep(
-                    attempt,
-                    minimum=15.0 if self._is_rate_limited(exc) else 2.0,
-                )
-                continue
-
-            except Exception as exc:
-                # Do NOT blindly retry programming / SDK shape errors.
-                last = exc
-
-                if self._retryable(exc):
+                last_err = exc
+                cause = exc.__cause__ or exc
+                if i < len(models) - 1 and self._retryable(cause):
                     logger.warn(
                         tag,
-                        f"transient {type(exc).__name__} "
-                        f"(attempt {attempt + 1})",
+                        f"Model '{m}' unavailable after retries ({exc}). Falling back to '{models[i + 1]}'",
                     )
-                    if attempt >= self.cfg.max_retries:
-                        break
-                    self._sleep(attempt, minimum=2.0)
                     continue
+                raise
 
-                logger.error(
-                    tag,
-                    f"non-retryable {type(exc).__name__}: failing fast",
-                )
-                raise GeminiError(
-                    f"Gemini JSON call failed: {type(exc).__name__}"
-                ) from exc
+        raise last_err or GeminiError("Gemini JSON generation failed across all models")
 
-            if attempt < self.cfg.max_retries:
-                self._sleep(attempt, minimum=2.0)
-                continue
-
-            break
-
-        raise GeminiError(
-            "Gemini JSON call failed after retries: "
-            f"{type(last).__name__ if last else 'unknown'}"
-        )
-
-    # ------------------------------------------------------------------
-    # images
-    # ------------------------------------------------------------------
     def generate_image(
         self,
         prompt: str,
-        *,
-        references: list[tuple[bytes, str]] | None = None,
-        aspect_ratio: str = "16:9",
-    ) -> tuple[bytes, str]:
-        """
-        Generate a new image and optionally use supplied reference images.
+        aspect_ratio: str = "1:1",
+        tag: str = "GEMINI_IMAGE",
+    ) -> bytes:
+        """Generates an image bytes payload using Imagen or Gemini image generation model."""
+        if not self._client:
+            raise GeminiError("Gemini client is not configured")
 
-        Returns:
-            (image_bytes, mime_type)
+        from google.genai import types
 
-        Retry budget (cost control):
-        - At most `max_total_calls` API calls across BOTH aspect-ratio modes.
-        - Empty/filtered IMAGE responses: at most 2 empty results total, then stop
-          (image_generator may change prompt/strategy afterward).
-        - HTTP 400 on aspect config: drop aspect and continue within budget.
-        - Transient API errors: backoff; 429 uses minimum 15s.
-        - Unexpected non-retryable exceptions: fail fast.
-        """
-        contents: list = [prompt]
+        api_key_override = self.cfg.image_api_key or self.cfg.gemini_api_key
+        client_to_use = self._client
+        if api_key_override and api_key_override != self.cfg.gemini_api_key:
+            try:
+                from google import genai
 
-        for b, m in references or []:
-            contents.append(
-                types.Part.from_bytes(
-                    data=b,
-                    mime_type=m,
-                )
-            )
+                client_to_use = genai.Client(api_key=api_key_override)
+            except Exception as e:
+                logger.warn(tag, f"Failed to initialize image client override, falling back: {e}")
 
-        last: Exception | None = None
+        models_to_try = [self.cfg.gemini_image_model, "imagen-3.0-generate-002"]
 
-        # Hard cap across aspect-on + aspect-off paths.
-        # Example: max_retries=3 -> max_total_calls=4 (not 3*2=6).
-        max_total_calls = max(
-            1,
-            min(self.cfg.max_retries + 1, 4),
-        )
-        calls_used = 0
-        empty_image_count = 0
+        backoffs = [3.0, 7.0, 15.0]
+        max_attempts = len(backoffs) + 1
 
-        for use_ratio in (True, False):
-            if calls_used >= max_total_calls:
-                break
-
-            while calls_used < max_total_calls:
-                attempt = calls_used
-                calls_used += 1
-
+        for model_name in models_to_try:
+            for attempt in range(1, max_attempts + 1):
                 try:
-                    config = self._image_config(
-                        aspect_ratio,
-                        use_aspect=use_ratio,
-                    )
+                    img_config = None
+                    try:
+                        img_config = types.ImageConfig(aspect_ratio=aspect_ratio)
+                    except Exception:
+                        pass
 
-                    resp = self.image_client.models.generate_content(
-                        model=self.cfg.gemini_image_model,
-                        contents=contents,
+                    config_args: dict[str, Any] = {
+                        "number_of_images": 1,
+                        "output_mime_type": "image/jpeg",
+                    }
+                    if img_config is not None:
+                        config_args["image_config"] = img_config
+
+                    config = types.GenerateImagesConfig(**config_args)
+
+                    response = client_to_use.models.generate_images(
+                        model=model_name,
+                        prompt=prompt,
                         config=config,
                     )
 
-                    image = self._extract_image_from_response(resp)
-                    if image:
-                        return image
+                    generated_images = getattr(response, "generated_images", None)
+                    if generated_images and len(generated_images) > 0:
+                        first = generated_images[0]
+                        image_obj = getattr(first, "image", None)
+                        if image_obj:
+                            image_bytes = getattr(image_obj, "image_bytes", None)
+                            if image_bytes:
+                                return bytes(image_bytes)
 
-                    empty_image_count += 1
-                    last = ImageGenError(
-                        "no image in response "
-                        "(refused, filtered, or empty response)"
-                    )
+                    raise GeminiError(f"No image bytes returned in response from {model_name}")
 
-                    logger.warn(
-                        "IMAGE",
-                        "image response contained no usable image "
-                        f"(call {calls_used}/{max_total_calls}, "
-                        f"aspect={'on' if use_ratio else 'off'})",
-                    )
-
-                    # Same prompt + empty IMAGE usually will not heal.
-                    if empty_image_count >= 2:
-                        raise ImageGenError(
-                            "no usable image after repeated empty/filtered responses"
-                        )
-
-                    self._sleep(attempt, minimum=2.0)
-                    continue
-
-                except ImageGenError:
-                    raise
-
-                except genai_errors.APIError as exc:
-                    last = exc
-                    code = getattr(exc, "code", None)
-
-                    if use_ratio and code == 400:
+                except Exception as e:
+                    if not self._retryable(e) or attempt == max_attempts:
                         logger.warn(
-                            "IMAGE",
-                            "model rejected image aspect/config; "
-                            "switching to no-aspect path",
-                        )
-                        break  # next use_ratio=False
-
-                    if not self._retryable(exc):
-                        raise ImageGenError(
-                            f"image API error {getattr(exc, 'code', '?')}"
-                        ) from exc
-
-                    logger.warn(
-                        "IMAGE",
-                        f"image API error {getattr(exc, 'code', '?')} "
-                        f"(call {calls_used}/{max_total_calls})",
-                    )
-
-                    if calls_used >= max_total_calls:
-                        raise ImageGenError(
-                            f"image API error {getattr(exc, 'code', '?')}"
-                        ) from exc
-
-                    self._sleep(
-                        attempt,
-                        minimum=15.0 if self._is_rate_limited(exc) else 2.0,
-                    )
-                    continue
-
-                except Exception as exc:
-                    last = exc
-
-                    # Aspect/config shape issues -> try without aspect.
-                    if use_ratio and isinstance(
-                        exc,
-                        (TypeError, ValueError, AttributeError),
-                    ):
-                        logger.warn(
-                            "IMAGE",
-                            "image config was not accepted; "
-                            "switching to no-aspect path",
+                            tag,
+                            f"Image model {model_name} attempt {attempt} failed: {e}",
                         )
                         break
 
-                    if self._retryable(exc):
-                        logger.warn(
-                            "IMAGE",
-                            f"transient {type(exc).__name__} "
-                            f"(call {calls_used}/{max_total_calls})",
-                        )
-                        if calls_used >= max_total_calls:
-                            break
-                        self._sleep(attempt, minimum=2.0)
-                        continue
+                    delay = backoffs[attempt - 1]
+                    logger.warn(
+                        tag,
+                        f"Image error on {model_name} (attempt {attempt}), retrying in {delay}s...",
+                    )
+                    time.sleep(delay)
 
-                    raise ImageGenError(
-                        f"image call failed: {type(exc).__name__}"
-                    ) from exc
-
-        raise ImageGenError(
-            "image generation failed: "
-            f"{type(last).__name__ if last else 'unknown'}"
-        )
+        raise GeminiError("All image generation attempts and models failed")
