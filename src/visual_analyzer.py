@@ -3,12 +3,19 @@ from __future__ import annotations
 
 import io
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageFile, UnidentifiedImageError
 
 from . import logger
 from .gemini_client import GeminiClient, GeminiError
 from .models import SourceArticle, VisualAnalysis, VisualSchema
 from .utils import FetchError, PoliteFetcher, sha256_hex
+
+# Defend against decompression bombs before load().
+Image.MAX_IMAGE_PIXELS = 40_000_000
+ImageFile.LOAD_TRUNCATED_IMAGES = False
+
+# Reject huge downloads early (bytes), before PIL work.
+MAX_SOURCE_IMAGE_BYTES = 12 * 1024 * 1024
 
 SUBJECT_TYPES = {
     "person",
@@ -32,13 +39,35 @@ REFERENCE_IDENTITY_TYPES = {
 }
 
 VISUAL_SYSTEM = """You analyse a news/story photo to prepare a NEW illustration of the same story.
-Separate IDENTITY features (must stay the same: species/breed/markings, vehicle make/colour/damage, building/place architecture & landmarks, object shape/colour) from SCENE features (pose, angle, lighting, background, moment) that may change.
-Be factual: describe only what is visible. Never identify, name, or guess a real person's identity.
-Do not invent facial, biographical, or personal attributes.
-When the main subject is a real person and reference-preserving generation is permitted, describe only visible non-sensitive visual attributes that are actually supported by the reference image, such as clothing, hairstyle, accessories, pose, approximate presentation, and surrounding context. For people only note that they are present (and whether any appear to be children).
-subject_type must be one of: person, place, animal, vehicle, object, building, event, scene, multiple_subjects, other.
-contains_real_people=true if any real human is visible. involves_minors=true if any child/teen appears.
-identity_confidence: low/medium/high = how well this single reference image supports faithful recreation of the main subject without inventing unsupported details."""
+
+Separate:
+- IDENTITY features that must stay the same when the subject is non-human
+  (species/breed/markings, vehicle make/colour/damage, building/place architecture
+  and landmarks, object shape/colour)
+- SCENE features that may change (pose, angle, lighting, background, moment)
+
+Be factual: describe only what is visible.
+
+REAL PEOPLE:
+- Never identify, name, or guess a real person's identity.
+- Do not invent facial, biographical, or personal attributes.
+- Do not request facial reconstruction or recognition.
+- If people are present, note only that they are present and whether any appear
+  to be children/minors.
+- Optional non-sensitive context only when clearly visible: clothing type,
+  approximate pose, accessories, surrounding place — never face identity.
+
+subject_type must be one of:
+person, place, animal, vehicle, object, building, event, scene,
+multiple_subjects, other.
+
+contains_real_people=true if any real human is visible.
+involves_minors=true if any child/teen appears.
+identity_confidence: low/medium/high = how well this single reference image
+supports faithful recreation of a NON-HUMAN main subject without inventing
+unsupported details. For person-primary images use low unless the task is
+clearly non-identity scene context.
+"""
 
 
 def ahash(img: Image.Image) -> str:
@@ -54,32 +83,45 @@ def hamming(a: str, b: str) -> int:
 
 
 def _prepare(data: bytes) -> tuple[bytes, str, str, str] | None:
-    """Validate, cap size (<=1280px), return (jpeg_bytes, mime, sha, ahash)."""
+    """
+    Validate, cap size (<=1280px), return (jpeg_bytes, mime, sha, ahash).
+
+    sha is computed on the ORIGINAL download bytes for traceability.
+    ahash is computed on the normalized RGB thumbnail used as model input.
+    """
     if not data:
+        return None
+
+    if len(data) > MAX_SOURCE_IMAGE_BYTES:
         return None
 
     try:
         img = Image.open(io.BytesIO(data))
         img.load()
+    except Image.DecompressionBombError:
+        logger.warn(
+            "VISUAL",
+            "source image rejected (decompression bomb)",
+        )
+        return None
     except (UnidentifiedImageError, OSError):
         return None
 
     if min(img.size) < 300:
         return None
 
-    img = img.convert("RGB")
-    img.thumbnail((1280, 1280))
-
-    buf = io.BytesIO()
-
     try:
+        img = img.convert("RGB")
+        img.thumbnail((1280, 1280))
+
+        buf = io.BytesIO()
         img.save(
             buf,
             "JPEG",
             quality=88,
             optimize=True,
         )
-    except OSError:
+    except (Image.DecompressionBombError, OSError):
         return None
 
     return (
@@ -134,7 +176,24 @@ def acquire_source_image(
             if not content_type.startswith("image/"):
                 continue
 
-            prepared = _prepare(r.content)
+            # Early size gate from headers when available.
+            cl = r.headers.get("Content-Length", "").strip()
+            if cl.isdigit() and int(cl) > MAX_SOURCE_IMAGE_BYTES:
+                logger.warn(
+                    "VISUAL",
+                    f"image skipped (Content-Length {cl} > cap)",
+                )
+                continue
+
+            raw = r.content
+            if len(raw) > MAX_SOURCE_IMAGE_BYTES:
+                logger.warn(
+                    "VISUAL",
+                    "image skipped (body larger than cap)",
+                )
+                continue
+
+            prepared = _prepare(raw)
 
             if prepared:
                 b, m, sha, ah = prepared
@@ -208,13 +267,11 @@ def analyze(
         else "other"
     )
 
-    # These are subjects for which preserving the specific source
-    # identity can be meaningful without recreating a real person's face.
+    # Non-human subjects may keep reference identity without recreating faces.
     non_human_identity = st in REFERENCE_IDENTITY_TYPES
 
     # People are intentionally excluded from reference_identity here.
-    # image_generator.py handles real people through the safe people
-    # strategy instead of attempting to recreate a real person's identity.
+    # image_generator.py handles real people through the safe people strategy.
     identity_critical = (
         bool(res.identity_critical)
         and non_human_identity
@@ -225,13 +282,13 @@ def analyze(
         or st in {"person", "multiple_subjects"}
     )
 
-    # A reference image can be required for a specific non-human subject.
-    # For real people, the image may still be used as contextual reference,
-    # but it must not be treated as permission to recreate their face.
+    # CHANGED: Now also requires identity_critical to be True.
+    # We only restrict Gemini's creative freedom with a strict reference 
+    # if the non-human identity is actually important to the story.
     reference_required = (
         bool(image)
-        and non_human_identity
-        and not res.involves_minors
+        and identity_critical
+        and not bool(res.involves_minors)
     )
 
     identity_confidence = (
@@ -240,15 +297,18 @@ def analyze(
         else "low"
     )
 
+    if identity_confidence not in {"low", "medium", "high"}:
+        identity_confidence = "low"
+
     return VisualAnalysis(
         subject_type=st,
         identity_critical=identity_critical,
         contains_real_people=contains_real_people,
         involves_minors=bool(res.involves_minors),
-        identity_features=res.identity_features[:12],
-        scene_features=res.scene_features[:10],
-        new_scene_direction=res.new_scene_direction,
+        identity_features=list(res.identity_features or [])[:12],
+        scene_features=list(res.scene_features or [])[:10],
+        new_scene_direction=res.new_scene_direction or "",
         reference_required=reference_required,
         identity_confidence=identity_confidence,
-        summary=res.summary,
+        summary=res.summary or "",
     )
