@@ -16,6 +16,11 @@ on:
         type: boolean
         default: true
 
+      manual_override:
+        description: "Ignore the daily target (manual runs only)"
+        type: boolean
+        default: false
+
 concurrency:
   group: viral-content-factory
   cancel-in-progress: false
@@ -29,21 +34,28 @@ jobs:
     timeout-minutes: 90
 
     env:
+      PYTHONUNBUFFERED: "1"
+
       # Scheduled runs are always LIVE (false).
       # Manual runs follow the dry_run input.
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
 
       NUMBER_OF_STORIES: ${{ inputs.number_of_stories }}
 
-      MANUAL_OVERRIDE: "false"
+      MANUAL_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && inputs.manual_override || 'false' }}
 
-      # Image publisher needs to push generated images during the
-      # Python execution so that Blogger can receive public image URLs.
-      GIT_PUSH_ENABLED: "true"
+      # Images are pushed during execution so Blogger receives public URLs.
+      # Never push anything during a dry run.
+      GIT_PUSH_ENABLED: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'false' || 'true' }}
+
+      # Public base URL of the pushed images (requires a public repository).
+      # Override with a repository variable named IMAGE_PUBLIC_BASE_URL if needed.
+      IMAGE_PUBLIC_BASE_URL: ${{ vars.IMAGE_PUBLIC_BASE_URL || format('https://raw.githubusercontent.com/{0}/{1}/data/images', github.repository, github.ref_name) }}
 
       TARGET_DAILY_STORIES: ${{ vars.TARGET_DAILY_STORIES || '6' }}
       MAX_STORIES_PER_RUN: ${{ vars.MAX_STORIES_PER_RUN || '3' }}
       MAX_SOURCE_AGE_HOURS: ${{ vars.MAX_SOURCE_AGE_HOURS || '48' }}
+      MIN_VIRAL_SCORE: ${{ vars.MIN_VIRAL_SCORE || '60' }}
 
       PEOPLE_IMAGE_STYLE: ${{ vars.PEOPLE_IMAGE_STYLE || 'reference' }}
 
@@ -87,24 +99,27 @@ jobs:
       - name: Run factory
         run: python -m src.main
 
-      # Safety net:
-      # Persist history/cache changes if the factory stops midway.
-      #
+      # Safety net: persist history/cache changes if the factory stopped midway.
       # Generated images are intentionally NOT added here because
-      # image_publisher.py already pushes them during execution when
-      # GIT_PUSH_ENABLED=true.
+      # image_publisher.py already pushes them during execution.
       - name: Commit state
         if: always() && env.DRY_RUN != 'true'
         run: |
-          git add data/history.json data/cache || true
+          git add data/history.json 2>/dev/null || true
+          git add data/cache 2>/dev/null || true
 
           if git diff --cached --quiet; then
             echo "No state changes to commit."
           else
             git commit -m "chore: update factory state [skip ci]"
 
+            pushed=false
+
             for i in 1 2 3; do
-              git push && break
+              if git push; then
+                pushed=true
+                break
+              fi
 
               git pull --rebase --autostash || {
                 git rebase --abort || true
@@ -113,6 +128,10 @@ jobs:
 
               sleep $((i * 3))
             done
+
+            if [ "$pushed" != "true" ]; then
+              echo "::warning::Could not push factory state after 3 attempts."
+            fi
           fi
 
       # Downloadable story ZIP bundles.
