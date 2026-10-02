@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -91,6 +91,39 @@ def _jsonld(soup: BeautifulSoup) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# URL helpers
+# ---------------------------------------------------------------------------
+def _safe_http_url(url: str) -> str:
+    """Return a valid absolute HTTP(S) URL or an empty string."""
+    if not isinstance(url, str):
+        return ""
+
+    value = url.strip()
+
+    if not value:
+        return ""
+
+    if value.startswith(("//",)):
+        value = f"https:{value}"
+
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return ""
+
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return ""
+
+    if not parsed.netloc:
+        return ""
+
+    if parsed.username is not None or parsed.password is not None:
+        return ""
+
+    return value
+
+
+# ---------------------------------------------------------------------------
 # srcset / image helpers
 # ---------------------------------------------------------------------------
 def _best_from_srcset(srcset: str) -> str:
@@ -100,8 +133,9 @@ def _best_from_srcset(srcset: str) -> str:
 
     best = ""
     best_w = -1
+    best_index = -1
 
-    for part in srcset.split(","):
+    for index, part in enumerate(srcset.split(",")):
         bits = part.strip().split()
 
         if not bits:
@@ -120,9 +154,10 @@ def _best_from_srcset(srcset: str) -> str:
 
         w = int(m.group(1)) if m else 0
 
-        if w > best_w:
+        if w > best_w or (w == best_w and index > best_index):
             best = candidate
             best_w = w
+            best_index = index
 
     return best
 
@@ -132,9 +167,16 @@ def _looks_like_bad_image_url(url: str) -> bool:
     if not url:
         return True
 
-    low = url.lower()
+    low = url.lower().strip()
 
-    if low.startswith(("data:", "blob:", "javascript:")):
+    if low.startswith(
+        (
+            "data:",
+            "blob:",
+            "javascript:",
+            "mailto:",
+        )
+    ):
         return True
 
     if re.search(
@@ -161,19 +203,32 @@ def _image_dimensions(tag) -> tuple[int, int]:
 
 def _image_candidate_from_tag(tag) -> str:
     """Return the best image URL from an <img> tag (lazy-load aware)."""
-    for attr in ("src", "data-src", "data-lazy-src", "data-original", "data-lazy"):
-        v = tag.get(attr)
-        if isinstance(v, str):
-            v = v.strip()
-            if v and not v.startswith("data:"):
-                return v
-
+    # Prefer responsive srcset because it often contains a substantially
+    # higher-resolution editorial image than the fallback src.
     for attr in ("srcset", "data-srcset"):
         v = tag.get(attr)
+
         if isinstance(v, str) and v.strip():
             best = _best_from_srcset(v)
-            if best:
+
+            if best and not _looks_like_bad_image_url(best):
                 return best
+
+    # Fallback to ordinary and lazy-loaded image attributes.
+    for attr in (
+        "src",
+        "data-src",
+        "data-lazy-src",
+        "data-original",
+        "data-lazy",
+    ):
+        v = tag.get(attr)
+
+        if isinstance(v, str):
+            v = v.strip()
+
+            if v and not _looks_like_bad_image_url(v):
+                return v
 
     return ""
 
@@ -195,9 +250,11 @@ def _images(
     )
 
     if og and not _looks_like_bad_image_url(og):
-        urls.append(
-            urljoin(base, og)
-        )
+        joined = urljoin(base, og)
+        safe = _safe_http_url(joined)
+
+        if safe:
+            urls.append(safe)
 
     # JSON-LD image(s).
     img = ld.get("image")
@@ -224,9 +281,11 @@ def _images(
             u = u.strip()
 
             if not _looks_like_bad_image_url(u):
-                urls.append(
-                    urljoin(base, u)
-                )
+                joined = urljoin(base, u)
+                safe = _safe_http_url(joined)
+
+                if safe:
+                    urls.append(safe)
 
     # Prefer article/main content for ordinary <img> extraction.
     root = (
@@ -264,9 +323,11 @@ def _images(
             if ratio > 8 or ratio < 0.12:
                 continue
 
-        urls.append(
-            urljoin(base, src)
-        )
+        joined = urljoin(base, src)
+        safe = _safe_http_url(joined)
+
+        if safe:
+            urls.append(safe)
 
     # Also inspect <source srcset> elements inside picture tags.
     for source in root.find_all("source"):
@@ -281,9 +342,11 @@ def _images(
         if _looks_like_bad_image_url(src):
             continue
 
-        urls.append(
-            urljoin(base, src)
-        )
+        joined = urljoin(base, src)
+        safe = _safe_http_url(joined)
+
+        if safe:
+            urls.append(safe)
 
     # Deduplicate while preserving priority order.
     seen: set[str] = set()
@@ -438,12 +501,14 @@ def _canonical_url(
         return ""
 
     try:
-        return urljoin(
+        resolved = urljoin(
             base_url,
             href,
         )
     except Exception:
         return ""
+
+    return _safe_http_url(resolved)
 
 
 # ---------------------------------------------------------------------------
@@ -456,14 +521,19 @@ def _author(soup: BeautifulSoup, ld: dict) -> str:
         for item in author:
             if isinstance(item, dict):
                 name = item.get("name")
+
                 if isinstance(name, str) and name.strip():
                     return clean_text(name)
+
             elif isinstance(item, str) and item.strip():
                 return clean_text(item)
+
     elif isinstance(author, dict):
         name = author.get("name")
+
         if isinstance(name, str) and name.strip():
             return clean_text(name)
+
     elif isinstance(author, str) and author.strip():
         return clean_text(author)
 
@@ -501,8 +571,10 @@ def _publication_date(
 
         try:
             parsed = parse_datetime(str(value))
+
             if parsed:
                 return parsed
+
         except Exception:
             continue
 
@@ -529,10 +601,12 @@ def extract_article(
 
     try:
         r.encoding = r.apparent_encoding or "utf-8"
+
         soup = BeautifulSoup(
             r.text,
             "lxml",
         )
+
     except Exception as exc:
         logger.warn(
             "EXTRACT",
@@ -541,19 +615,44 @@ def extract_article(
         return None
 
     ld = _jsonld(soup)
-    canonical = _canonical_url(soup, candidate.original_url)
-    author = _author(soup, ld)
-    date = _publication_date(soup, ld, candidate)
-    images = _images(soup, candidate.original_url, ld)
+    canonical = _canonical_url(
+        soup,
+        candidate.original_url,
+    )
+    author = _author(
+        soup,
+        ld,
+    )
+    date = _publication_date(
+        soup,
+        ld,
+        candidate,
+    )
+    images = _images(
+        soup,
+        candidate.original_url,
+        ld,
+    )
 
     title = (
-        _meta(soup, "og:title", "twitter:title")
-        or clean_text(str(ld.get("headline", "")))
+        _meta(
+            soup,
+            "og:title",
+            "twitter:title",
+        )
+        or clean_text(
+            str(ld.get("headline", ""))
+        )
         or candidate.original_title
     )
 
     description = (
-        _meta(soup, "og:description", "twitter:description", "description")
+        _meta(
+            soup,
+            "og:description",
+            "twitter:description",
+            "description",
+        )
         or candidate.description
     )
 
@@ -602,6 +701,7 @@ def is_valid(
     article_text_len = len(
         clean_text(article.article_text or "")
     )
+
     description_len = len(
         clean_text(article.description or "")
     )
