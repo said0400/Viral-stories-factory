@@ -118,7 +118,7 @@ def normalize_url(url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# IDs / hashes
+# IDs / hashes / filenames
 def sha256_hex(data: str | bytes) -> str:
     if isinstance(data, str):
         data = data.encode("utf-8")
@@ -131,6 +131,14 @@ def make_story_id(source: str, normalized_url: str) -> str:
     return sha256_hex(
         f"{source.strip().lower()}|{normalized_url}"
     )[:20]
+
+
+def safe_filename(text: str, max_length: int = 50) -> str:
+    """Convert arbitrary text into a safe, cross-platform filename."""
+    text = (text or "").strip()
+    text = re.sub(r'[^\w\s-]', '_', text, flags=re.UNICODE)
+    text = re.sub(r'[-\s_]+', '_', text).strip('_')
+    return text[:max_length]
 
 
 # ---------------------------------------------------------------------------
@@ -490,12 +498,13 @@ class PoliteFetcher:
                 ).strip()
 
                 if retry_after.isdigit():
+                    # Increased minimum delay to 15s to respect rate limits better
                     delay = min(
-                        30,
-                        max(1, int(retry_after)),
+                        60,
+                        max(15, int(retry_after)),
                     )
                 else:
-                    delay = 10
+                    delay = 15
 
                 r.close()
                 time.sleep(delay)
