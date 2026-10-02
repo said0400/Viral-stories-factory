@@ -9,129 +9,681 @@ from bs4 import BeautifulSoup
 
 from . import logger
 from .models import SourceArticle
-from .utils import FetchError, PoliteFetcher, clean_text, normalize_url, parse_datetime
+from .utils import (
+    FetchError,
+    PoliteFetcher,
+    clean_text,
+    normalize_url,
+    parse_datetime,
+)
 
 
+# ---------------------------------------------------------------------------
+# Metadata helpers
+# ---------------------------------------------------------------------------
 def _meta(soup: BeautifulSoup, *names: str) -> str:
+    """Return the first non-empty metadata value matching the supplied names."""
     for n in names:
-        tag = soup.find("meta", attrs={"property": n}) or soup.find("meta", attrs={"name": n})
+        tag = (
+            soup.find("meta", attrs={"property": n})
+            or soup.find("meta", attrs={"name": n})
+        )
+
         if tag and tag.get("content"):
-            return clean_text(tag["content"])
+            value = clean_text(str(tag["content"]))
+            if value:
+                return value
+
     return ""
 
 
+# ---------------------------------------------------------------------------
+# JSON-LD
+# ---------------------------------------------------------------------------
 def _jsonld(soup: BeautifulSoup) -> dict:
+    """Return the most useful Article/NewsArticle JSON-LD object."""
+    accepted_types = {
+        "Article",
+        "NewsArticle",
+        "ReportageNewsArticle",
+        "BlogPosting",
+    }
+
     for s in soup.find_all("script", type="application/ld+json"):
+        raw = s.string or s.get_text() or ""
+
         try:
-            data = json.loads(s.string or "")
-        except (json.JSONDecodeError, TypeError):
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
             continue
-        items = data if isinstance(data, list) else data.get("@graph", [data])
+
+        if isinstance(data, dict):
+            if isinstance(data.get("@graph"), list):
+                items = data["@graph"]
+            else:
+                items = [data]
+        elif isinstance(data, list):
+            items = data
+        else:
+            continue
+
         for it in items:
-            if isinstance(it, dict) and str(it.get("@type", "")).endswith(
-                    ("Article", "NewsArticle", "ReportageNewsArticle", "BlogPosting")):
+            if not isinstance(it, dict):
+                continue
+
+            raw_type = it.get("@type", "")
+
+            if isinstance(raw_type, list):
+                types = {
+                    str(x).strip()
+                    for x in raw_type
+                    if x
+                }
+            else:
+                types = {
+                    str(raw_type).strip()
+                } if raw_type else set()
+
+            if types & accepted_types:
                 return it
+
     return {}
 
 
+# ---------------------------------------------------------------------------
+# srcset / image helpers
+# ---------------------------------------------------------------------------
 def _best_from_srcset(srcset: str) -> str:
-    best, best_w = "", -1
+    """Return the highest-resolution URL from a srcset attribute."""
+    if not srcset:
+        return ""
+
+    best = ""
+    best_w = -1
+
     for part in srcset.split(","):
         bits = part.strip().split()
+
         if not bits:
             continue
-        m = re.match(r"(\d+)w", bits[1]) if len(bits) > 1 else None
+
+        candidate = bits[0]
+
+        if not candidate:
+            continue
+
+        m = (
+            re.match(r"(\d+)w$", bits[1])
+            if len(bits) > 1
+            else None
+        )
+
         w = int(m.group(1)) if m else 0
+
         if w > best_w:
-            best, best_w = bits[0], w
+            best = candidate
+            best_w = w
+
     return best
 
 
-def _images(soup: BeautifulSoup, base: str, ld: dict) -> list[str]:
+def _image_candidate_from_tag(tag) -> str:
+    """Extract the most useful image URL from one <img> element."""
+    srcset = (
+        tag.get("srcset")
+        or tag.get("data-srcset")
+        or tag.get("data-lazy-srcset")
+        or ""
+    )
+
+    src = _best_from_srcset(str(srcset))
+
+    if src:
+        return src
+
+    for attr in (
+        "data-src",
+        "data-lazy-src",
+        "data-original",
+        "data-url",
+        "src",
+    ):
+        value = tag.get(attr)
+
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return ""
+
+
+def _looks_like_bad_image_url(url: str) -> bool:
+    """Reject obvious UI/decorative image URLs."""
+    if not url:
+        return True
+
+    low = url.lower()
+
+    if low.startswith(("data:", "blob:", "javascript:")):
+        return True
+
+    if re.search(
+        r"(logo|avatar|icon|sprite|pixel|tracking|favicon|placeholder|"
+        r"social[-_]?share|share[-_]?image|badge|button)",
+        low,
+        re.I,
+    ):
+        return True
+
+    return False
+
+
+def _image_dimensions(tag) -> tuple[int, int]:
+    """Read numeric width/height attributes when available."""
+    width = tag.get("width", "")
+    height = tag.get("height", "")
+
+    w = int(width) if str(width).isdigit() else 0
+    h = int(height) if str(height).isdigit() else 0
+
+    return w, h
+
+
+def _images(
+    soup: BeautifulSoup,
+    base: str,
+    ld: dict,
+) -> list[str]:
+    """Collect likely editorial images while filtering UI/decorative assets."""
     urls: list[str] = []
-    og = _meta(soup, "og:image", "twitter:image")
+
+    # OpenGraph / Twitter image.
+    og = _meta(
+        soup,
+        "og:image",
+        "twitter:image",
+        "twitter:image:src",
+    )
+
     if og:
-        urls.append(urljoin(base, og))
+        urls.append(
+            urljoin(base, og)
+        )
+
+    # JSON-LD image(s).
     img = ld.get("image")
-    for it in (img if isinstance(img, list) else [img]):
-        u = it.get("url") if isinstance(it, dict) else it
-        if isinstance(u, str) and u:
-            urls.append(urljoin(base, u))
-    root = soup.find("article") or soup.find("main") or soup
+
+    if isinstance(img, dict):
+        img_items = [img]
+    elif isinstance(img, list):
+        img_items = img
+    else:
+        img_items = [img]
+
+    for it in img_items:
+        if isinstance(it, dict):
+            u = (
+                it.get("url")
+                or it.get("contentUrl")
+                or it.get("thumbnailUrl")
+                or ""
+            )
+        else:
+            u = it
+
+        if isinstance(u, str) and u.strip():
+            u = u.strip()
+
+            if not _looks_like_bad_image_url(u):
+                urls.append(
+                    urljoin(base, u)
+                )
+
+    # Prefer article/main content for ordinary <img> extraction.
+    root = (
+        soup.find("article")
+        or soup.find("main")
+        or soup.body
+        or soup
+    )
+
     for tag in root.find_all("img"):
-        src = _best_from_srcset(tag.get("srcset", "")) or tag.get("data-src") or tag.get("src") or ""
-        if not src or src.startswith("data:") or re.search(r"(logo|avatar|icon|sprite|pixel)", src, re.I):
+        src = _image_candidate_from_tag(tag)
+
+        if _looks_like_bad_image_url(src):
             continue
-        w = tag.get("width", "")
-        if w.isdigit() and int(w) < 300:
+
+        width, height = _image_dimensions(tag)
+
+        # Ignore explicitly tiny images.
+        if width and width < 300:
             continue
-        urls.append(urljoin(base, src))
-    seen, out = set(), []
+
+        if height and height < 200:
+            continue
+
+        # Ignore obvious tracking/decorative dimensions.
+        if width and height:
+            ratio = width / max(height, 1)
+
+            if width < 400 and height < 400:
+                continue
+
+            if ratio > 8 or ratio < 0.12:
+                continue
+
+        urls.append(
+            urljoin(base, src)
+        )
+
+    # Also inspect <source srcset> elements inside picture tags.
+    for source in root.find_all("source"):
+        srcset = (
+            source.get("srcset")
+            or source.get("data-srcset")
+            or ""
+        )
+
+        src = _best_from_srcset(str(srcset))
+
+        if _looks_like_bad_image_url(src):
+            continue
+
+        urls.append(
+            urljoin(base, src)
+        )
+
+    # Deduplicate while preserving priority order.
+    seen: set[str] = set()
+    out: list[str] = []
+
     for u in urls:
-        k = u.split("?")[0]
-        if k not in seen:
-            seen.add(k)
-            out.append(u)
-    return out[:6]
+        if not isinstance(u, str):
+            continue
+
+        u = u.strip()
+
+        if not u:
+            continue
+
+        # Remove fragments but preserve query parameters because some
+        # image CDNs use query parameters for the actual image resource.
+        key = u.split("#", 1)[0]
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        out.append(u)
+
+    return out[:8]
 
 
+# ---------------------------------------------------------------------------
+# Article body extraction
+# ---------------------------------------------------------------------------
 def _body(soup: BeautifulSoup) -> str:
-    for t in soup(["script", "style", "nav", "footer", "aside", "form", "noscript", "figure"]):
+    """
+    Extract readable article text.
+
+    Decorative/non-content sections are removed, while figures are preserved
+    long enough for image extraction to happen before this function is called.
+    """
+    for t in soup(
+        [
+            "script",
+            "style",
+            "nav",
+            "footer",
+            "aside",
+            "form",
+            "noscript",
+            "template",
+            "svg",
+        ]
+    ):
         t.decompose()
-    root = soup.find("article") or soup.find("main") or soup.body or soup
-    paras = [clean_text(p.get_text(" ")) for p in root.find_all(["p", "h2", "h3", "li"])]
-    paras = [p for p in paras if len(p) > 40 and not re.search(
-        r"(subscribe|sign up|newsletter|cookie|all rights reserved|follow us)", p, re.I)]
-    return "\n".join(paras)[:12000]
+
+    root = (
+        soup.find("article")
+        or soup.find("main")
+        or soup.body
+        or soup
+    )
+
+    paras = []
+
+    for p in root.find_all(
+        [
+            "p",
+            "h2",
+            "h3",
+            "li",
+        ]
+    ):
+        text = clean_text(
+            p.get_text(" ", strip=True)
+        )
+
+        if not text:
+            continue
+
+        # Very short fragments are usually navigation/UI labels.
+        if len(text) <= 40:
+            continue
+
+        # Common boilerplate.
+        if re.search(
+            r"("
+            r"subscribe|"
+            r"sign[\s-]*up|"
+            r"newsletter|"
+            r"cookie|"
+            r"accept cookies|"
+            r"all rights reserved|"
+            r"follow us|"
+            r"follow on|"
+            r"share this|"
+            r"read more|"
+            r"related stories|"
+            r"you may also like|"
+            r"advertisement|"
+            r"advertising"
+            r")",
+            text,
+            re.I,
+        ):
+            continue
+
+        paras.append(text)
+
+    # Remove exact duplicate paragraphs while preserving order.
+    seen: set[str] = set()
+    unique: list[str] = []
+
+    for p in paras:
+        key = re.sub(
+            r"\s+",
+            " ",
+            p,
+        ).strip().lower()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique.append(p)
+
+    return "\n".join(unique)[:12000]
 
 
-def extract_article(candidate: SourceArticle, fetcher: PoliteFetcher) -> SourceArticle | None:
+# ---------------------------------------------------------------------------
+# Canonical URL
+# ---------------------------------------------------------------------------
+def _canonical_url(
+    soup: BeautifulSoup,
+    base_url: str,
+) -> str:
+    """Extract and normalize the page canonical URL."""
+    canon_tag = soup.find(
+        "link",
+        rel=lambda value: (
+            "canonical" in value
+            if isinstance(value, list)
+            else value == "canonical"
+        ),
+    )
+
+    if not canon_tag:
+        return ""
+
+    href = canon_tag.get("href")
+
+    if not isinstance(href, str) or not href.strip():
+        return ""
+
+    href = href.strip()
+
+    if href.startswith(
+        (
+            "javascript:",
+            "data:",
+            "mailto:",
+            "#",
+        )
+    ):
+        return ""
+
+    try:
+        return urljoin(
+            base_url,
+            href,
+        )
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Author
+# ---------------------------------------------------------------------------
+def _author(soup: BeautifulSoup, ld: dict) -> str:
+    """Extract an author name from JSON-LD or standard metadata."""
+    author = ld.get("author")
+
+    if isinstance(author, list):
+        for item in author:
+            if isinstance(item, dict):
+                name = item.get("name")
+
+                if isinstance(name, str) and name.strip():
+                    return clean_text(name)
+
+            elif isinstance(item, str) and item.strip():
+                return clean_text(item)
+
+    elif isinstance(author, dict):
+        name = author.get("name")
+
+        if isinstance(name, str) and name.strip():
+            return clean_text(name)
+
+    elif isinstance(author, str) and author.strip():
+        return clean_text(author)
+
+    return _meta(
+        soup,
+        "author",
+        "article:author",
+        "byl",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Publication date
+# ---------------------------------------------------------------------------
+def _publication_date(
+    soup: BeautifulSoup,
+    ld: dict,
+    candidate: SourceArticle,
+):
+    """Extract the strongest available publication date."""
+    candidates = [
+        ld.get("datePublished"),
+        ld.get("dateCreated"),
+        _meta(
+            soup,
+            "article:published_time",
+            "og:published_time",
+            "datePublished",
+            "date",
+        ),
+    ]
+
+    for value in candidates:
+        if not value:
+            continue
+
+        try:
+            parsed = parse_datetime(str(value))
+
+            if parsed:
+                return parsed
+        except Exception:
+            continue
+
+    return candidate.publication_date
+
+
+# ---------------------------------------------------------------------------
+# Full article extraction
+# ---------------------------------------------------------------------------
+def extract_article(
+    candidate: SourceArticle,
+    fetcher: PoliteFetcher,
+) -> SourceArticle | None:
     """Fill a discovery candidate with full details. Returns None if unusable."""
     try:
-        r = fetcher.get(candidate.original_url)
+        r = fetcher.get(
+            candidate.original_url
+        )
     except FetchError as exc:
-        logger.warn("EXTRACT", f"{candidate.source_name}: {exc}")
+        logger.warn(
+            "EXTRACT",
+            f"{candidate.source_name}: {exc}",
+        )
         return None
-    soup = BeautifulSoup(r.text, "lxml")
+
+    try:
+        soup = BeautifulSoup(
+            r.text,
+            "lxml",
+        )
+    except Exception as exc:
+        logger.warn(
+            "EXTRACT",
+            f"{candidate.source_name}: failed to parse HTML: {exc}",
+        )
+        return None
+
     ld = _jsonld(soup)
-    canon_tag = soup.find("link", rel="canonical")
-    canonical = urljoin(candidate.original_url, canon_tag["href"]) if canon_tag and canon_tag.get("href") else ""
-    author = ""
-    a = ld.get("author")
-    if isinstance(a, list) and a:
-        a = a[0]
-    if isinstance(a, dict):
-        author = a.get("name", "")
-    elif isinstance(a, str):
-        author = a
-    author = author or _meta(soup, "author", "article:author")
 
-    date = parse_datetime(ld.get("datePublished") or _meta(soup, "article:published_time", "og:published_time")) \
-        or candidate.publication_date
-    images = _images(soup, candidate.original_url, ld)
-    title = _meta(soup, "og:title") or clean_text(ld.get("headline", "")) or candidate.original_title
-    text = _body(soup)
+    canonical = _canonical_url(
+        soup,
+        candidate.original_url,
+    )
 
-    upd = candidate.model_copy(update={
-        "original_title": title,
-        "canonical_url": canonical,
-        "normalized_url": normalize_url(canonical or candidate.original_url),
-        "publication_date": date,
-        "author": clean_text(author),
-        "description": _meta(soup, "og:description", "description") or candidate.description,
-        "article_text": text,
-        "main_image_url": images[0] if images else candidate.main_image_url,
-        "additional_image_urls": images[1:],
-    })
+    author = _author(
+        soup,
+        ld,
+    )
+
+    date = _publication_date(
+        soup,
+        ld,
+        candidate,
+    )
+
+    # IMPORTANT:
+    # Extract images before _body() modifies/removes page elements.
+    images = _images(
+        soup,
+        candidate.original_url,
+        ld,
+    )
+
+    title = (
+        _meta(
+            soup,
+            "og:title",
+            "twitter:title",
+        )
+        or clean_text(
+            str(ld.get("headline", ""))
+        )
+        or candidate.original_title
+    )
+
+    description = (
+        _meta(
+            soup,
+            "og:description",
+            "twitter:description",
+            "description",
+        )
+        or candidate.description
+    )
+
+    text = _body(
+        soup
+    )
+
+    normalized_source_url = normalize_url(
+        canonical or candidate.original_url
+    )
+
+    if not normalized_source_url:
+        normalized_source_url = normalize_url(
+            candidate.original_url
+        )
+
+    upd = candidate.model_copy(
+        update={
+            "original_title": clean_text(title),
+            "canonical_url": canonical,
+            "normalized_url": normalized_source_url,
+            "publication_date": date,
+            "author": clean_text(author),
+            "description": clean_text(description),
+            "article_text": text,
+            "main_image_url": (
+                images[0]
+                if images
+                else candidate.main_image_url
+            ),
+            "additional_image_urls": images[1:],
+        }
+    )
+
     return upd
 
 
-def is_valid(article: SourceArticle, min_chars: int) -> tuple[bool, str]:
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+def is_valid(
+    article: SourceArticle,
+    min_chars: int,
+) -> tuple[bool, str]:
     """Reject articles whose basic data prevents verification of the story."""
     if not article.original_title or not article.original_url:
         return False, "missing title/url"
-    if len(article.article_text) < min_chars and len(article.description) < 200:
-        return False, "not enough text to verify the story"
+
+    article_text_len = len(
+        clean_text(article.article_text or "")
+    )
+
+    description_len = len(
+        clean_text(article.description or "")
+    )
+
+    # Prefer a real article body for verification.
+    # A description is accepted only when it is sufficiently substantial.
+    if article_text_len < min_chars:
+        if description_len < 200:
+            return False, "not enough text to verify the story"
+
+    # If there is neither usable body text nor a meaningful description,
+    # the article cannot be reliably verified.
+    if article_text_len == 0 and description_len == 0:
+        return False, "empty article content"
+
+    if not article.normalized_url:
+        return False, "missing normalized URL"
+
+    if not article.canonical_url:
+        # Missing canonical URL is allowed because many sites omit it.
+        pass
+
     if not article.publication_date:
         return True, "no publication date (allowed, flagged)"
+
     return True, ""
