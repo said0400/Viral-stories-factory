@@ -7,7 +7,8 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
-# ======================================================================= pipeline
+# =======================================================================
+# pipeline
 class SourceArticle(BaseModel):
     source_name: str
     original_title: str
@@ -106,6 +107,7 @@ class StoryState(BaseModel):
     facebook_status: str = ""
     whatsapp_status: str = ""
     error: str = ""
+
     # extras: traceability / recovery
     blogger_title: str = ""
     subject_type: str = ""
@@ -130,7 +132,8 @@ class StoryCache(BaseModel):
     analysis_reason: str = ""
 
 
-# ======================================================================= Gemini schemas
+# =======================================================================
+# Gemini schemas
 # (kept free of defaults/validators for maximum JSON-Schema compatibility)
 class TriageItem(BaseModel):
     index: int
@@ -142,9 +145,15 @@ class TriageItem(BaseModel):
     originality_score: int
     emotional_score: int
     is_evergreen: bool
-    duplicate_of: int            # index of the same event in this batch, or -1
-    already_published: bool      # same event as one in the "already published" list
-    event_key: str               # people / place / event in a few words (English)
+
+    # index of the same event in this batch, or -1
+    duplicate_of: int
+
+    # same event as one in the "already published" list
+    already_published: bool
+
+    # people / place / event in a few words (English)
+    event_key: str
     reason: str
 
 
@@ -153,14 +162,16 @@ class TriageResult(BaseModel):
 
 
 class VisualSchema(BaseModel):
-    subject_type: str            # person|place|animal|vehicle|object|building|event|scene|multiple_subjects|other
+    subject_type: str
+    # person|place|animal|vehicle|object|building|
+    # event|scene|multiple_subjects|other
     identity_critical: bool
     contains_real_people: bool
     involves_minors: bool
     identity_features: list[str]
     scene_features: list[str]
     new_scene_direction: str
-    identity_confidence: str     # low|medium|high
+    identity_confidence: str  # low|medium|high
     summary: str
 
 
