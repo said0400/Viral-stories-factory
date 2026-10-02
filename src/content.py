@@ -143,9 +143,9 @@ NEVER pad the article to reach a word count.
 
 8. facebook_post:
 Structure:
-HOOK -> INTEREST -> PARTIAL CONTEXT -> CURIOSITY -> CTA pointing to the full article.
+HOOK -> INTEREST -> PARTIAL CONTEXT -> CURIOSITY.
 
-Do NOT include any URL.
+Do NOT include any URL or website placeholder.
 Do NOT reveal the entire story or main twist.
 Do NOT fabricate suspense.
 Do NOT claim that something happened unless the source confirms it.
@@ -234,7 +234,7 @@ Do not introduce a new factual claim in one field that is absent from the articl
 
 FACT_SYSTEM = """You are a strict fact checker.
 
-Compare the ARTICLE and FACEBOOK POST against the SOURCE TEXT.
+Compare the ARTICLE, SEO DESCRIPTION, and FACEBOOK POST against the SOURCE TEXT.
 
 List every concrete claim that is NOT supported by the source.
 
@@ -287,7 +287,10 @@ If everything is supported, return an empty unsupported_claims list and all_clai
 # ---------------------------------------------------------------- sanitising
 def sanitize_html(raw: str) -> str:
     """Allow-list sanitiser: strips scripts, attributes, unknown tags (keeps their text)."""
-    soup = BeautifulSoup(raw or "", "lxml")
+    if not raw:
+        return ""
+
+    soup = BeautifulSoup(raw, "lxml")
 
     for t in soup(
         [
@@ -314,10 +317,8 @@ def sanitize_html(raw: str) -> str:
         else:
             t.attrs = {}
 
-    return "".join(
-        str(c)
-        for c in (soup.body or soup).contents
-    ).strip()
+    body = soup.body or soup
+    return "".join(str(c) for c in body.contents).strip()
 
 
 def render_blogger_html(
@@ -329,9 +330,8 @@ def render_blogger_html(
     """Final post HTML: image + sanitised body + attribution + hidden idempotency marker."""
     body = sanitize_html(content.blogger_html)
 
-    host = urlparse(
-        article.original_url
-    ).netloc.removeprefix("www.")
+    parsed_url = urlparse(article.original_url or "")
+    host = parsed_url.netloc.removeprefix("www.") or "source"
 
     img = (
         f'<figure style="margin:0 0 1.2em;text-align:center">'
@@ -438,9 +438,7 @@ def triage(
                 ),
             )
 
-        if it.duplicate_of < 0:
-            it.duplicate_of = -1
-        elif it.duplicate_of >= it.index:
+        if it.duplicate_of < 0 or it.duplicate_of >= len(candidates) or it.duplicate_of >= it.index:
             it.duplicate_of = -1
 
         out[it.index] = it
@@ -490,11 +488,12 @@ def generate_content(
         )
     )
 
+    # Temperature set to 0.5 (lowered from 0.8) for better factual accuracy.
     res = gem.generate_json(
         prompt,
         ContentSchema,
         system=CONTENT_SYSTEM,
-        temperature=0.8,
+        temperature=0.5,
         tag="CONTENT",
     )
 
@@ -518,8 +517,10 @@ def fact_check(
         f"{(article.article_text or article.description)[:9000]}\n\n"
         f"ARTICLE TITLE:\n"
         f"{content.blogger_title}\n\n"
+        f"SEO DESCRIPTION:\n"
+        f"{content.seo_description}\n\n"
         f"ARTICLE BODY:\n"
-        f"{plain[:7000]}\n\n"
+        f"{plain[:12000]}\n\n"
         f"FACEBOOK TITLE:\n"
         f"{content.facebook_title}\n\n"
         f"FACEBOOK POST:\n"
@@ -609,7 +610,6 @@ def generate_verified(
             ),
         )
 
-        # The regenerated content is independently checked again.
         final_check = fact_check(
             gem,
             article,
