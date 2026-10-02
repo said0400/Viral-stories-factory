@@ -6,11 +6,9 @@ Encapsulates initialization, retry logic, timeout handling, fallback models, and
 
 from __future__ import annotations
 
-import io
 import time
 from typing import Any, TypeVar
 
-from PIL import Image
 from pydantic import BaseModel
 
 from src.config import Settings
@@ -142,7 +140,7 @@ class GeminiClient:
     ) -> T:
         """
         Generates structured JSON output validated against a Pydantic schema.
-        Falls back to fallback model if primary model is overloaded/unavailable (503/429/500).
+        Falls back to fallback model if primary model fails or is overloaded/unavailable.
         """
         models = [self.cfg.gemini_model]
         fb = (self.cfg.gemini_fallback_model or "").strip()
@@ -164,11 +162,10 @@ class GeminiClient:
                 )
             except GeminiError as exc:
                 last_err = exc
-                cause = exc.__cause__ or exc
-                if i < len(models) - 1 and self._retryable(cause):
+                if i < len(models) - 1:
                     logger.warn(
                         tag,
-                        f"Model '{m}' unavailable after retries ({exc}). Falling back to '{models[i + 1]}'",
+                        f"Model '{m}' failed ({exc}). Falling back to '{models[i + 1]}'",
                     )
                     continue
                 raise
