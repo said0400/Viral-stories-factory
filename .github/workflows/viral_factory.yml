@@ -29,14 +29,16 @@ jobs:
     timeout-minutes: 90
 
     env:
-      # Scheduled runs are always LIVE.
-      # Manual runs follow the dry_run input.
+      # Scheduled runs are always LIVE (false). Manual runs follow dry_run input.
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
 
       NUMBER_OF_STORIES: ${{ inputs.number_of_stories }}
 
       MANUAL_OVERRIDE: "false"
-      GIT_PUSH_ENABLED: "true"
+      
+      # FIX: Keep GIT_PUSH_ENABLED false during Python execution.
+      # The workflow itself handles the single atomic commit & push at the end.
+      GIT_PUSH_ENABLED: "false"
 
       TARGET_DAILY_STORIES: ${{ vars.TARGET_DAILY_STORIES || '6' }}
       MAX_STORIES_PER_RUN: ${{ vars.MAX_STORIES_PER_RUN || '3' }}
@@ -82,8 +84,7 @@ jobs:
       - name: Run factory
         run: python -m src.main
 
-      # Safety net:
-      # persist history/cache/images even if the run stopped midway.
+      # Safety net: persist history/cache/images even if the run stopped midway.
       - name: Commit state
         if: always() && env.DRY_RUN != 'true'
         run: |
@@ -106,10 +107,14 @@ jobs:
             done
           fi
 
-      - name: Upload dry-run previews
-        if: env.DRY_RUN == 'true'
+      # FIX: Upload downloadable story ZIP bundles cleanly per run.
+      - name: Upload downloadable story bundles
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dry-run-previews
-          path: data/dry_run/
+          name: story-bundles-${{ github.run_id }}
+          path: |
+            data/exports/
+            data/dry_run/exports/
           if-no-files-found: ignore
+          retention-days: 14
