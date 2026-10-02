@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import html as html_lib
+import re
 from urllib.parse import urlparse
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 
 from . import logger
 from .gemini_client import GeminiClient
@@ -285,14 +286,28 @@ If everything is supported, return an empty unsupported_claims list and all_clai
 
 
 # ---------------------------------------------------------------- sanitising
+
 def sanitize_html(raw: str) -> str:
-    """Allow-list sanitiser: strips scripts, attributes, unknown tags (keeps their text)."""
+    """
+    Allow-list HTML sanitiser.
+
+    Removes executable/dangerous elements, comments, attributes and unknown
+    tags while preserving the text/content of harmless unknown wrappers.
+    """
     if not raw:
         return ""
 
-    soup = BeautifulSoup(raw, "lxml")
+    soup = BeautifulSoup(str(raw), "lxml")
 
-    for t in soup(
+    # Remove comments explicitly. This prevents model-generated HTML comments
+    # from surviving into the article body.
+    for comment in soup.find_all(
+        string=lambda value: isinstance(value, Comment)
+    ):
+        comment.extract()
+
+    # Remove dangerous or explicitly forbidden elements.
+    for tag in soup.find_all(
         [
             "script",
             "style",
@@ -302,23 +317,110 @@ def sanitize_html(raw: str) -> str:
             "form",
             "img",
             "a",
+            "meta",
+            "link",
+            "base",
+            "svg",
+            "math",
+            "video",
+            "audio",
+            "source",
+            "picture",
         ]
     ):
-        if t.name == "a":
-            t.unwrap()
+        if tag.name == "a":
+            tag.unwrap()
         else:
-            t.decompose()
+            tag.decompose()
 
-    for t in soup.find_all(True):
-        if t.name in ("html", "body"):
-            t.unwrap()
-        elif t.name not in ALLOWED_TAGS:
-            t.unwrap()
-        else:
-            t.attrs = {}
+    # Remove document-level wrappers and enforce the allow-list.
+    for tag in list(soup.find_all(True)):
+        name = str(tag.name or "").lower()
 
-    body = soup.body or soup
-    return "".join(str(c) for c in body.contents).strip()
+        if name in ("html", "head", "body"):
+            tag.unwrap()
+            continue
+
+        if name not in ALLOWED_TAGS:
+            tag.unwrap()
+            continue
+
+        # No attributes are allowed on article-generated tags.
+        tag.attrs = {}
+
+    # BeautifulSoup can leave doctype/document artefacts depending on input.
+    # Work only with the resulting body/content nodes.
+    body = soup.body
+
+    if body is not None:
+        return "".join(str(child) for child in body.contents).strip()
+
+    return "".join(str(child) for child in soup.contents).strip()
+
+
+def _safe_story_id(story_id: str) -> str:
+    """
+    Validate and normalise the story ID used in the Blogger idempotency marker.
+
+    The marker is intentionally simple because history.py and blogger.py use
+    the exact same `story_id:<id>` convention.
+    """
+    value = str(story_id or "").strip()
+
+    if not value:
+        raise ValueError("story_id is required")
+
+    if len(value) > 128:
+        raise ValueError("story_id is too long")
+
+    if not re.fullmatch(r"[A-Za-z0-9._:-]+", value):
+        raise ValueError("story_id contains unsupported characters")
+
+    return value
+
+
+def _safe_source_host(source_url: str) -> str:
+    """Return a safe display hostname for the attribution line."""
+    parsed_url = urlparse(source_url or "")
+
+    host = (parsed_url.hostname or "").strip().lower()
+
+    if not host:
+        return "source"
+
+    if host.startswith("www."):
+        host = host[4:]
+
+    return html_lib.escape(host, quote=True)
+
+
+def _safe_source_url(source_url: str) -> str:
+    """
+    Return a source URL only when it is a normal HTTP(S) URL.
+
+    The article source URL originates from discovery, but this validation
+    prevents malformed schemes from being emitted into the final Blogger HTML.
+    """
+    value = str(source_url or "").strip()
+
+    if not value:
+        return ""
+
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return ""
+
+    if parsed.scheme not in ("http", "https"):
+        return ""
+
+    if not parsed.netloc:
+        return ""
+
+    if parsed.username or parsed.password:
+        return ""
+
+    return value
 
 
 def render_blogger_html(
@@ -327,44 +429,79 @@ def render_blogger_html(
     image_url: str,
     story_id: str,
 ) -> str:
-    """Final post HTML: image + sanitised body + attribution + hidden idempotency marker."""
+    """
+    Final Blogger HTML:
+    image + sanitised body + attribution + hidden idempotency marker.
+    """
+    safe_story_id = _safe_story_id(story_id)
+
     body = sanitize_html(content.blogger_html)
 
-    parsed_url = urlparse(article.original_url or "")
-    host = parsed_url.netloc.removeprefix("www.") or "source"
+    source_url = _safe_source_url(article.original_url)
 
-    img = (
-        f'<figure style="margin:0 0 1.2em;text-align:center">'
-        f'<img src="{html_lib.escape(image_url, quote=True)}" '
-        f'alt="{html_lib.escape(content.blogger_title, quote=True)}" '
-        f'style="max-width:100%;height:auto" loading="lazy"/></figure>'
-        if image_url
-        else ""
-    )
+    if source_url:
+        host = _safe_source_host(source_url)
 
-    src = (
-        f'<p><strong>المصدر:</strong> '
-        f'<a href="{html_lib.escape(article.original_url, quote=True)}" '
-        f'rel="nofollow noopener" target="_blank">'
-        f'{html_lib.escape(article.source_name)}</a> '
-        f'({html_lib.escape(host)})</p>'
-        f'<p><em>الصورة المرفقة مُولَّدة بالذكاء الاصطناعي لأغراض توضيحية.</em></p>'
-    )
+        src = (
+            f'<p><strong>المصدر:</strong> '
+            f'<a href="{html_lib.escape(source_url, quote=True)}" '
+            f'rel="nofollow noopener" target="_blank">'
+            f'{html_lib.escape(article.source_name)}</a> '
+            f'({host})</p>'
+            f'<p><em>'
+            f'الصورة المرفقة مُولَّدة بالذكاء الاصطناعي لأغراض توضيحية.'
+            f'</em></p>'
+        )
+    else:
+        src = (
+            f'<p><strong>المصدر:</strong> '
+            f'{html_lib.escape(article.source_name or "المصدر")}</p>'
+            f'<p><em>'
+            f'الصورة المرفقة مُولَّدة بالذكاء الاصطناعي لأغراض توضيحية.'
+            f'</em></p>'
+        )
+
+    safe_image_url = str(image_url or "").strip()
+
+    img = ""
+
+    if safe_image_url:
+        try:
+            parsed_image = urlparse(safe_image_url)
+
+            if parsed_image.scheme in ("http", "https") and parsed_image.netloc:
+                img = (
+                    f'<figure style="margin:0 0 1.2em;text-align:center">'
+                    f'<img src="'
+                    f'{html_lib.escape(safe_image_url, quote=True)}" '
+                    f'alt="'
+                    f'{html_lib.escape(content.blogger_title, quote=True)}" '
+                    f'style="max-width:100%;height:auto" '
+                    f'loading="lazy"/></figure>'
+                )
+        except ValueError:
+            img = ""
 
     return (
         f'<div dir="rtl" style="text-align:right">'
-        f'{img}{body}{src}'
+        f'{img}'
+        f'{body}'
+        f'{src}'
         f'</div>'
-        f'<!-- story_id:{html_lib.escape(story_id, quote=False)} -->'
+        f'<!-- story_id:{html_lib.escape(safe_story_id, quote=False)} -->'
     )
 
 
 # ---------------------------------------------------------------- triage
+
 def triage(
     gem: GeminiClient,
     candidates: list[SourceArticle],
     published_titles: list[str],
 ) -> list[TriageItem]:
+    if not candidates:
+        return []
+
     lines = []
 
     for i, c in enumerate(candidates):
@@ -383,6 +520,7 @@ def triage(
         "\n".join(
             f"- {t}"
             for t in published_titles[:60]
+            if str(t).strip()
         )
         or "(none)"
     )
@@ -418,7 +556,7 @@ def triage(
         if not 0 <= it.index < len(candidates):
             continue
 
-        for f in (
+        for field in (
             "viral_score",
             "curiosity_score",
             "share_score",
@@ -426,20 +564,44 @@ def triage(
             "originality_score",
             "emotional_score",
         ):
+            value = getattr(it, field, 0)
+
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                value = 0
+
             setattr(
                 it,
-                f,
-                max(
-                    0,
-                    min(
-                        100,
-                        getattr(it, f),
-                    ),
-                ),
+                field,
+                max(0, min(100, value)),
             )
 
-        if it.duplicate_of < 0 or it.duplicate_of >= len(candidates) or it.duplicate_of >= it.index:
-            it.duplicate_of = -1
+        # duplicate_of must be an earlier candidate and cannot refer to
+        # itself. Invalid references are converted to "no duplicate".
+        duplicate_of = getattr(it, "duplicate_of", -1)
+
+        try:
+            duplicate_of = int(duplicate_of)
+        except (TypeError, ValueError):
+            duplicate_of = -1
+
+        if (
+            duplicate_of < 0
+            or duplicate_of >= len(candidates)
+            or duplicate_of >= it.index
+        ):
+            duplicate_of = -1
+
+        it.duplicate_of = duplicate_of
+
+        # Keep event_key compact and safe for downstream logs/selection.
+        event_key = str(getattr(it, "event_key", "") or "").strip()
+
+        if len(event_key) > 160:
+            event_key = event_key[:160].rstrip()
+
+        it.event_key = event_key
 
         out[it.index] = it
 
@@ -459,6 +621,7 @@ def rank_score(item: TriageItem) -> float:
 
 
 # ---------------------------------------------------------------- generation
+
 def generate_content(
     gem: GeminiClient,
     article: SourceArticle,
@@ -478,6 +641,7 @@ def generate_content(
         + "\n".join(
             f"- {t}"
             for t in avoid_titles[:40]
+            if str(t).strip()
         )
         + (
             "\n\nCORRECTIONS REQUIRED FROM THE FACT CHECKER "
@@ -488,7 +652,7 @@ def generate_content(
         )
     )
 
-    # Temperature set to 0.5 (lowered from 0.8) for better factual accuracy.
+    # Temperature set to 0.5 for better factual accuracy.
     res = gem.generate_json(
         prompt,
         ContentSchema,
