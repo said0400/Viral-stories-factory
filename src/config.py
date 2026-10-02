@@ -89,7 +89,7 @@ class Settings:
     # --- gemini
     gemini_model: str = "gemini-3.8-flash"
     gemini_fallback_model: str = "gemini-2.5-flash"
-    gemini_image_model: str = "gemini-3.1-flash-image"
+    gemini_image_model=_str("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-lite-image", env),
     gemini_api_key: str = ""
     image_api_key: str = ""
     llm_timeout: int = 180
