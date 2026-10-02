@@ -3,12 +3,14 @@ name: Viral Stories Factory
 on:
   schedule:
     - cron: "0 */4 * * *"
+
   workflow_dispatch:
     inputs:
       number_of_stories:
         description: "Number of stories for this run (empty = automatic)"
         required: false
         default: ""
+
       dry_run:
         description: "Dry run (no Blogger / WhatsApp / history changes)"
         type: boolean
@@ -25,30 +27,42 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+
     env:
-      # Scheduled runs are always LIVE; manual runs follow the dry_run input.
+      # Scheduled runs are always LIVE.
+      # Manual runs follow the dry_run input.
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+
       NUMBER_OF_STORIES: ${{ inputs.number_of_stories }}
+
       MANUAL_OVERRIDE: "false"
       GIT_PUSH_ENABLED: "true"
+
       TARGET_DAILY_STORIES: ${{ vars.TARGET_DAILY_STORIES || '6' }}
       MAX_STORIES_PER_RUN: ${{ vars.MAX_STORIES_PER_RUN || '3' }}
       MAX_SOURCE_AGE_HOURS: ${{ vars.MAX_SOURCE_AGE_HOURS || '48' }}
-      PEOPLE_IMAGE_STYLE: ${{ vars.PEOPLE_IMAGE_STYLE || 'illustration' }}
+
+      PEOPLE_IMAGE_STYLE: ${{ vars.PEOPLE_IMAGE_STYLE || 'reference' }}
+
       DAY_TIMEZONE: ${{ vars.DAY_TIMEZONE || 'Africa/Casablanca' }}
+
       GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.8-flash' }}
       GEMINI_IMAGE_MODEL: ${{ vars.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-image' }}
+
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       IMAGE_API_KEY: ${{ secrets.IMAGE_API_KEY }}
+
       BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
       GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
       GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+
       TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
       TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
       TWILIO_WHATSAPP_NUMBER: ${{ secrets.TWILIO_WHATSAPP_NUMBER }}
       YOUR_PERSONAL_NUMBER: ${{ secrets.YOUR_PERSONAL_NUMBER }}
       WHATSAPP_CONTENT_SID: ${{ secrets.WHATSAPP_CONTENT_SID }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -62,24 +76,32 @@ jobs:
 
       - name: Configure git
         run: |
-          git config user.name  "viral-factory-bot"
+          git config user.name "viral-factory-bot"
           git config user.email "viral-factory-bot@users.noreply.github.com"
 
       - name: Run factory
         run: python -m src.main
 
-      # Safety net: persist history/cache/images even if the run stopped midway.
+      # Safety net:
+      # persist history/cache/images even if the run stopped midway.
       - name: Commit state
         if: always() && env.DRY_RUN != 'true'
         run: |
           git add data/history.json data/cache data/images || true
+
           if git diff --cached --quiet; then
             echo "No state changes to commit."
           else
             git commit -m "chore: update factory state [skip ci]"
+
             for i in 1 2 3; do
               git push && break
-              git pull --rebase --autostash || { git rebase --abort || true; break; }
+
+              git pull --rebase --autostash || {
+                git rebase --abort || true
+                break
+              }
+
               sleep $((i * 3))
             done
           fi
