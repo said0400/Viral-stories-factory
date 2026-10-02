@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -58,14 +58,25 @@ class Settings:
     your_personal_number: str = ""
     whatsapp_content_sid: str = ""
 
+    # NOTE:
+    # For REAL people, "reference" is treated as "illustration" by the
+    # image generator (see image_generator.choose_strategy). This is an
+    # intentional ethical/safety limit; the config name is kept for
+    # backward compatibility with .env.example.
     people_image_style: str = "reference"  # reference | illustration | faceless
     facebook_separate_image: bool = True
     image_public_base_url: str = ""
     image_vlm_check: bool = True
     image_required: bool = True
 
+    # Network / HTTP for scraping and public image hosting.
     request_timeout: int = 60
     image_request_timeout: int = 180
+
+    # LLM calls (Gemini) need longer than normal HTTP calls because a
+    # single structured-JSON article can take 60-120s to complete.
+    llm_timeout: int = 180
+
     max_retries: int = 3
     per_host_delay: float = 2.0
     user_agent: str = "ViralStoriesFactoryBot/1.0"
@@ -83,8 +94,23 @@ class Settings:
     manual_override: bool = False
     number_of_stories: int = 0  # 0 = automatic
 
+    # Export / downloadable bundles.
+    export_enabled: bool = True
+
     github_repository: str = ""
     github_ref_name: str = "main"
+
+    def __post_init__(self):
+        """Clamp numeric values to prevent logical errors (e.g. negative timeouts)."""
+        object.__setattr__(self, 'target_daily_stories', max(1, self.target_daily_stories))
+        object.__setattr__(self, 'max_stories_per_run', max(1, self.max_stories_per_run))
+        object.__setattr__(self, 'min_viral_score', max(0, min(100, self.min_viral_score)))
+        object.__setattr__(self, 'request_timeout', max(10, self.request_timeout))
+        object.__setattr__(self, 'image_request_timeout', max(30, self.image_request_timeout))
+        object.__setattr__(self, 'llm_timeout', max(60, self.llm_timeout))
+        object.__setattr__(self, 'max_retries', max(0, self.max_retries))
+        object.__setattr__(self, 'max_story_attempts', max(1, self.max_story_attempts))
+        object.__setattr__(self, 'min_article_chars', max(100, self.min_article_chars))
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -132,6 +158,7 @@ class Settings:
 
             request_timeout=_int("REQUEST_TIMEOUT", 60),
             image_request_timeout=_int("IMAGE_REQUEST_TIMEOUT", 180),
+            llm_timeout=_int("LLM_TIMEOUT", 180),
             max_retries=_int("MAX_RETRIES", 3),
             per_host_delay=_float(
                 "PER_HOST_DELAY_SECONDS",
@@ -176,6 +203,8 @@ class Settings:
                 0,
             ),
 
+            export_enabled=_bool("EXPORT_ENABLED", True),
+
             github_repository=_str(
                 "GITHUB_REPOSITORY"
             ),
@@ -197,6 +226,11 @@ class Settings:
     @property
     def dry_run_dir(self) -> Path:
         return self.data_dir / "dry_run"
+
+    @property
+    def exports_dir(self) -> Path:
+        """Where downloadable story bundles (ZIP) are stored."""
+        return self.data_dir / "exports"
 
     @property
     def public_images_base(self) -> str:
@@ -221,16 +255,34 @@ class Settings:
             self.twilio_auth_token,
             self.twilio_account_sid,
             self.google_client_id,
+            self.twilio_whatsapp_number,
+            self.your_personal_number,
+            self.whatsapp_content_sid,
+            self.blogger_blog_id,
         ]
 
+        # Only redact if string is at least 5 chars to avoid redacting common single chars
         return [
-            v
-            for v in vals
-            if v and len(v) >= 6
+            v for v in vals if v and len(v) >= 5
         ]
+
+    def twilio_configured(self) -> bool:
+        """Return True when all required Twilio credentials are present."""
+        return bool(
+            self.twilio_account_sid
+            and self.twilio_auth_token
+            and self.twilio_whatsapp_number
+            and self.your_personal_number
+        )
 
     def validate(self, *, need_publish: bool) -> list[str]:
-        """Return a list of human-readable configuration problems."""
+        """Return a list of human-readable configuration problems.
+
+        Only truly blocking problems are returned here.
+        Missing Twilio credentials are NOT blocking: the pipeline will
+        simply skip WhatsApp notifications and mark the story as
+        'whatsapp_skipped' instead of 'whatsapp_failed'.
+        """
         problems: list[str] = []
 
         if not self.gemini_api_key:
@@ -259,3 +311,28 @@ class Settings:
                     )
 
         return problems
+
+    def warnings(self, *, need_publish: bool) -> list[str]:
+        """Return non-blocking configuration warnings."""
+        warns: list[str] = []
+
+        if need_publish and not self.twilio_configured():
+            warns.append(
+                "Twilio WhatsApp credentials are incomplete; "
+                "stories will publish without WhatsApp notifications"
+            )
+
+        if need_publish and not self.public_images_base:
+            warns.append(
+                "No public image base URL configured; "
+                "Blogger will use inline base64 images and "
+                "WhatsApp will send text-only notifications"
+            )
+
+        if self.llm_timeout < 120:
+            warns.append(
+                f"LLM_TIMEOUT={self.llm_timeout}s is low; "
+                "Arabic article generation may time out"
+            )
+
+        return warns
