@@ -1,9 +1,4 @@
-"""Downloadable Story Package Exporter.
-
-Creates standalone, non-destructive ZIP bundles containing all generated text,
-rendered HTML, images, preview HTML, source information, and metadata for
-offline review/download.
-"""
+"""Downloadable Story Package Exporter (non-destructive ZIP bundles)."""
 from __future__ import annotations
 
 import html as html_lib
@@ -24,12 +19,26 @@ from .facebook import CTA_LINE
 from .models import GeneratedContent, SourceArticle, StoryCache, StoryState
 from .utils import iso
 
-
 _SAFE_STORY_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_PLACEHOLDER = "{BLOGGER_URL_NOT_PUBLISHED_YET}"
+
+_CSS = """
+body { font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; background: #f4f6f8; color: #222; margin: 0; padding: 20px; }
+.container { max-width: 800px; margin: 0 auto; background: #fff; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); padding: 30px; }
+h1 { color: #1a252f; border-bottom: 2px solid #eee; padding-bottom: 10px; font-size: 1.8rem; }
+.badge { display: inline-block; background: #27ae60; color: #fff; padding: 4px 10px; border-radius: 20px; font-size: 0.85rem; font-weight: bold; margin-bottom: 15px; }
+.section { margin-bottom: 35px; border-top: 1px solid #eee; padding-top: 20px; }
+.section-title { font-size: 1.3rem; color: #2c3e50; margin-bottom: 15px; }
+.card { background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 18px; white-space: pre-wrap; word-break: break-word; }
+.article { background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 18px; word-break: break-word; }
+.meta-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+.meta-table td { padding: 8px; border-bottom: 1px solid #eee; font-size: 0.9rem; }
+.meta-table td:first-child { font-weight: bold; color: #555; width: 30%; }
+img.preview-img { max-width: 100%; height: auto; border-radius: 8px; margin: 10px 0; }
+"""
 
 
 def _validate_story_id(story_id: str) -> str:
-    """Validate a story ID before using it in filesystem paths."""
     value = (story_id or "").strip()
 
     if not value:
@@ -42,7 +51,6 @@ def _validate_story_id(story_id: str) -> str:
 
 
 def _safe_http_url(raw_url: str) -> str:
-    """Return a safe HTTP(S) URL or an empty string."""
     value = (raw_url or "").strip()
 
     if not value:
@@ -53,10 +61,7 @@ def _safe_http_url(raw_url: str) -> str:
     except ValueError:
         return ""
 
-    if parsed.scheme.lower() not in {"http", "https"}:
-        return ""
-
-    if not parsed.netloc:
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         return ""
 
     if parsed.username is not None or parsed.password is not None:
@@ -65,13 +70,30 @@ def _safe_http_url(raw_url: str) -> str:
     return value
 
 
+def _is_file(path: str | None) -> bool:
+    return bool(path) and Path(str(path)).is_file()
+
+
 def _plain_text_from_html(raw_html: str) -> str:
-    """Extract clean readable plain text from Blogger HTML."""
     if not raw_html:
         return ""
 
-    soup = BeautifulSoup(raw_html, "lxml")
-    return soup.get_text("\n\n", strip=True)
+    return BeautifulSoup(raw_html, "lxml").get_text("\n\n", strip=True)
+
+
+def _facebook_texts(st: StoryState, cache: StoryCache, content: GeneratedContent) -> tuple[str, str]:
+    """Publishable Facebook post/comment. The cached package is used only if it already holds the real URL."""
+    url = _safe_http_url(st.blogger_url)
+
+    if cache.facebook and url and url in (cache.facebook.post or ""):
+        return cache.facebook.post, cache.facebook.first_comment
+
+    target = url or _PLACEHOLDER
+
+    return (
+        f"{content.facebook_post}\n\n{CTA_LINE}\n{target}",
+        f"{content.first_comment_hook} 👇\n{target}",
+    )
 
 
 def _render_preview_html(
@@ -82,124 +104,56 @@ def _render_preview_html(
     has_article_img: bool,
     has_facebook_img: bool,
 ) -> str:
-    """Generate a clean, standalone, mobile-responsive, XSS-safe HTML preview file."""
+    esc = html_lib.escape
+
     blogger_url = _safe_http_url(st.blogger_url)
-    blogger_url_display = (
-        html_lib.escape(blogger_url)
-        if blogger_url
-        else "Not published yet (Offline Bundle)"
-    )
-    pub_status = html_lib.escape(st.status or "generated")
+    blogger_url_display = esc(blogger_url) if blogger_url else "Not published yet (Offline Bundle)"
 
-    raw_fb_post = content.facebook_post or ""
-    raw_fb_comment = content.first_comment_hook or ""
-
-    if cache.facebook:
-        final_fb_post = cache.facebook.post
-        final_fb_comment = cache.facebook.first_comment
-    elif blogger_url:
-        final_fb_post = f"{raw_fb_post}\n\n{CTA_LINE}\n{blogger_url}"
-        final_fb_comment = f"{raw_fb_comment} 👇\n{blogger_url}"
-    else:
-        final_fb_post = (
-            f"{raw_fb_post}\n\n"
-            f"{CTA_LINE}\n"
-            f"{{BLOGGER_URL_NOT_PUBLISHED_YET}}"
-        )
-        final_fb_comment = (
-            f"{raw_fb_comment} 👇\n"
-            f"{{BLOGGER_URL_NOT_PUBLISHED_YET}}"
-        )
-
-    title_escaped = html_lib.escape(content.blogger_title or "")
-    fb_title_escaped = html_lib.escape(content.facebook_title or "")
-    source_name_escaped = html_lib.escape(article.source_name or "")
+    post, comment = _facebook_texts(st, cache, content)
 
     source_url = _safe_http_url(article.original_url)
-    source_url_escaped = html_lib.escape(source_url, quote=True)
+    source_name = esc(article.source_name or "")
 
-    seo_desc_escaped = html_lib.escape(content.seo_description or "")
-    labels_escaped = html_lib.escape(", ".join(content.labels or []))
-    sanitized_blogger_body = editorial.sanitize_html(
-        content.blogger_html or ""
+    source_link = (
+        f'<a href="{esc(source_url, quote=True)}" target="_blank" rel="noopener noreferrer">{source_name}</a>'
+        if source_url
+        else source_name
     )
 
-    if source_url:
-        source_link_html = (
-            f'<a href="{source_url_escaped}" '
-            f'target="_blank" rel="noopener noreferrer">'
-            f"{source_name_escaped}</a>"
-        )
-    else:
-        source_link_html = source_name_escaped
+    art_img = '<img src="images/article_image.jpg" class="preview-img" alt="صورة المقال">' if has_article_img else ""
+    fb_img = '<img src="images/facebook_image.jpg" class="preview-img" alt="صورة فيسبوك">' if has_facebook_img else ""
 
-    art_img_tag = (
-        '<img src="images/article_image.jpg" '
-        'class="preview-img" alt="صورة المقال">'
-        if has_article_img
-        else ""
+    title = esc(content.blogger_title or "")
+    body = editorial.sanitize_html(content.blogger_html or "")
+
+    return (
+        '<!DOCTYPE html>\n<html lang="ar" dir="rtl">\n<head>\n'
+        '  <meta charset="UTF-8">\n'
+        '  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+        f"  <title>معاينة القصة - {title}</title>\n"
+        f"  <style>{_CSS}</style>\n</head>\n<body>\n"
+        '  <div class="container">\n'
+        f'    <span class="badge">الحالة: {esc(st.status or "generated")}</span>\n'
+        f"    <h1>{title}</h1>\n"
+        '    <div class="section">\n'
+        '      <div class="section-title">📰 محتوى المدونة (Blogger)</div>\n'
+        f'      {art_img}\n      <div class="article">{body}</div>\n    </div>\n'
+        '    <div class="section">\n'
+        '      <div class="section-title">📲 منشور فيسبوك (Facebook)</div>\n'
+        f"      {fb_img}\n"
+        f'      <div class="card"><strong>العنوان:</strong> {esc(content.facebook_title or "")}\n\n{esc(post)}</div>\n'
+        "      <p><strong>التعليق الأول:</strong></p>\n"
+        f'      <div class="card">{esc(comment)}</div>\n    </div>\n'
+        '    <div class="section">\n'
+        '      <div class="section-title">⚙️ البيانات الوصفية (Metadata)</div>\n'
+        '      <table class="meta-table">\n'
+        f"        <tr><td>المعرف (Story ID)</td><td>{esc(st.story_id)}</td></tr>\n"
+        f"        <tr><td>المصدر الأصلي</td><td>{source_link}</td></tr>\n"
+        f"        <tr><td>رابط Blogger المنشور</td><td>{blogger_url_display}</td></tr>\n"
+        f'        <tr><td>الوصف المخصص (SEO)</td><td>{esc(content.seo_description or "")}</td></tr>\n'
+        f'        <tr><td>الوسوم (Labels)</td><td>{esc(", ".join(content.labels or []))}</td></tr>\n'
+        "      </table>\n    </div>\n  </div>\n</body>\n</html>\n"
     )
-
-    fb_img_tag = (
-        '<img src="images/facebook_image.jpg" '
-        'class="preview-img" alt="صورة فيسبوك">'
-        if has_facebook_img
-        else ""
-    )
-
-    return f"""<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>معاينة القصة - {title_escaped}</title>
-  <style>
-    body {{ font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; background: #f4f6f8; color: #222; margin: 0; padding: 20px; }}
-    .container {{ max-width: 800px; margin: 0 auto; background: #fff; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); padding: 30px; }}
-    h1 {{ color: #1a252f; border-bottom: 2px solid #eee; padding-bottom: 10px; font-size: 1.8rem; }}
-    .badge {{ display: inline-block; background: #27ae60; color: #fff; padding: 4px 10px; border-radius: 20px; font-size: 0.85rem; font-weight: bold; margin-bottom: 15px; }}
-    .section {{ margin-bottom: 35px; border-top: 1px solid #eee; padding-top: 20px; }}
-    .section-title {{ font-size: 1.3rem; color: #2c3e50; margin-bottom: 15px; display: flex; align-items: center; gap: 8px; }}
-    .card {{ background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 18px; white-space: pre-wrap; font-size: 1rem; word-break: break-word; }}
-    .meta-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-    .meta-table td {{ padding: 8px; border-bottom: 1px solid #eee; font-size: 0.9rem; }}
-    .meta-table td:first-child {{ font-weight: bold; color: #555; width: 30%; }}
-    img.preview-img {{ max-width: 100%; height: auto; border-radius: 8px; margin: 10px 0; }}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <span class="badge">الحالة: {pub_status}</span>
-    <h1>{title_escaped}</h1>
-
-    <div class="section">
-      <div class="section-title">📰 محتوى المدونة (Blogger)</div>
-      {art_img_tag}
-      <div class="card">{sanitized_blogger_body}</div>
-    </div>
-
-    <div class="section">
-      <div class="section-title">📲 منشور فيسبوك (Facebook)</div>
-      {fb_img_tag}
-      <div class="card"><strong>العنوان:</strong> {fb_title_escaped}\n\n{html_lib.escape(final_fb_post)}</div>
-      <p><strong>التعليق الأول:</strong></p>
-      <div class="card">{html_lib.escape(final_fb_comment)}</div>
-    </div>
-
-    <div class="section">
-      <div class="section-title">⚙️ البيانات الوصفية (Metadata)</div>
-      <table class="meta-table">
-        <tr><td>المعرف (Story ID)</td><td>{html_lib.escape(st.story_id)}</td></tr>
-        <tr><td>المصدر الأصلي</td><td>{source_link_html}</td></tr>
-        <tr><td>رابط Blogger المنشور</td><td>{blogger_url_display}</td></tr>
-        <tr><td>الوصف المخصص (SEO)</td><td>{seo_desc_escaped}</td></tr>
-        <tr><td>الوسوم (Labels)</td><td>{labels_escaped}</td></tr>
-      </table>
-    </div>
-  </div>
-</body>
-</html>
-"""
 
 
 def create_story_package(
@@ -208,238 +162,108 @@ def create_story_package(
     cache: StoryCache,
     article: SourceArticle,
 ) -> Path | None:
-    """Build a directory structure containing all individual files for a story."""
+    """Build the directory structure containing all files for a story."""
     if not cache or not cache.content:
-        logger.warn(
-            "EXPORTER",
-            f"no content cached for {st.story_id}; skipping export",
-        )
+        logger.warn("EXPORTER", f"no content cached for {st.story_id}; skipping export")
         return None
 
     story_id = _validate_story_id(st.story_id)
-
     content = cache.content
+    image = cache.image
 
-    folder_name = f"story_{story_id}"
-    pkg_dir = target_dir / folder_name
+    pkg_dir = target_dir / f"story_{story_id}"
     pkg_dir.mkdir(parents=True, exist_ok=True)
 
-    # -----------------------------------------------------------------------
-    # 1. Images Directory
-    # -----------------------------------------------------------------------
+    # 1. images ------------------------------------------------------------
     images_dir = pkg_dir / "images"
     images_dir.mkdir(exist_ok=True)
 
     has_article_img = False
     has_facebook_img = False
 
-    if (
-        cache.image
-        and cache.image.path
-        and Path(cache.image.path).exists()
-        and Path(cache.image.path).is_file()
-    ):
+    if image and _is_file(image.path):
         try:
-            shutil.copy2(
-                cache.image.path,
-                images_dir / "article_image.jpg",
-            )
+            shutil.copy2(image.path, images_dir / "article_image.jpg")
             has_article_img = True
         except OSError as exc:
-            logger.warn(
-                "EXPORTER",
-                f"could not copy article image: {exc}",
-            )
+            logger.warn("EXPORTER", f"could not copy article image: {exc}")
 
-    fb_img_source = (
-        cache.image.facebook_path
-        if (
-            cache.image
-            and cache.image.facebook_path
-            and Path(cache.image.facebook_path).exists()
-            and Path(cache.image.facebook_path).is_file()
-        )
-        else (
-            cache.image.path
-            if (
-                cache.image
-                and cache.image.path
-                and Path(cache.image.path).exists()
-                and Path(cache.image.path).is_file()
-            )
-            else None
-        )
-    )
+    fb_source = None
 
-    if fb_img_source:
+    if image:
+        if _is_file(image.facebook_path):
+            fb_source = image.facebook_path
+        elif _is_file(image.path):
+            fb_source = image.path
+
+    if fb_source:
         try:
-            shutil.copy2(
-                fb_img_source,
-                images_dir / "facebook_image.jpg",
-            )
+            shutil.copy2(fb_source, images_dir / "facebook_image.jpg")
             has_facebook_img = True
         except OSError as exc:
-            logger.warn(
-                "EXPORTER",
-                f"could not copy facebook image: {exc}",
-            )
+            logger.warn("EXPORTER", f"could not copy facebook image: {exc}")
 
-    # -----------------------------------------------------------------------
-    # 2. Blogger Directory
-    # -----------------------------------------------------------------------
+    # 2. blogger -----------------------------------------------------------
     blogger_dir = pkg_dir / "blogger"
     blogger_dir.mkdir(exist_ok=True)
 
-    clean_blogger_body = editorial.sanitize_html(
-        content.blogger_html or ""
-    )
+    clean_body = editorial.sanitize_html(content.blogger_html or "")
 
-    (blogger_dir / "title.txt").write_text(
-        content.blogger_title,
-        encoding="utf-8",
-    )
+    (blogger_dir / "title.txt").write_text(content.blogger_title, encoding="utf-8")
+    (blogger_dir / "article_body.html").write_text(clean_body, encoding="utf-8")
 
-    (blogger_dir / "article_body.html").write_text(
-        clean_blogger_body,
-        encoding="utf-8",
-    )
-
-    # Image URL reference for full HTML:
-    # public URL if available, otherwise the correct relative path from
-    # blogger/article_full.html to images/article_image.jpg.
-    public_image_url = (
-        _safe_http_url(cache.image.public_url)
-        if cache.image
-        else ""
-    )
+    public_image_url = _safe_http_url(image.public_url) if image else ""
 
     if public_image_url:
-        image_ref_url = public_image_url
+        image_ref = public_image_url
     elif has_article_img:
-        image_ref_url = "../images/article_image.jpg"
+        image_ref = "../images/article_image.jpg"
     else:
-        image_ref_url = ""
-
-    full_html = editorial.render_blogger_html(
-        content,
-        article,
-        image_ref_url,
-        story_id,
-    )
+        image_ref = ""
 
     (blogger_dir / "article_full.html").write_text(
-        full_html,
+        editorial.render_blogger_html(content, article, image_ref, story_id),
         encoding="utf-8",
     )
+    (blogger_dir / "article_text.txt").write_text(_plain_text_from_html(clean_body), encoding="utf-8")
 
-    (blogger_dir / "article_text.txt").write_text(
-        _plain_text_from_html(clean_blogger_body),
-        encoding="utf-8",
-    )
-
-    # -----------------------------------------------------------------------
-    # 3. Facebook Directory (Separating Raw from Publishable Content)
-    # -----------------------------------------------------------------------
+    # 3. facebook ----------------------------------------------------------
     fb_dir = pkg_dir / "facebook"
     fb_dir.mkdir(exist_ok=True)
 
-    (fb_dir / "title.txt").write_text(
-        content.facebook_title,
-        encoding="utf-8",
-    )
+    pub_post, pub_comment = _facebook_texts(st, cache, content)
 
-    # Raw LLM Output
-    (fb_dir / "post.txt").write_text(
-        content.facebook_post,
-        encoding="utf-8",
-    )
+    (fb_dir / "title.txt").write_text(content.facebook_title, encoding="utf-8")
+    (fb_dir / "post.txt").write_text(content.facebook_post, encoding="utf-8")
+    (fb_dir / "first_comment.txt").write_text(content.first_comment_hook, encoding="utf-8")
+    (fb_dir / "publishable_post.txt").write_text(pub_post, encoding="utf-8")
+    (fb_dir / "publishable_first_comment.txt").write_text(pub_comment, encoding="utf-8")
 
-    (fb_dir / "first_comment.txt").write_text(
-        content.first_comment_hook,
-        encoding="utf-8",
-    )
-
-    # Final Promotion Copies (with Blogger URL if available)
-    blogger_url = _safe_http_url(st.blogger_url)
-
-    if cache.facebook:
-        pub_post = cache.facebook.post
-        pub_comment = cache.facebook.first_comment
-    elif blogger_url:
-        pub_post = (
-            f"{content.facebook_post}\n\n"
-            f"{CTA_LINE}\n"
-            f"{blogger_url}"
-        )
-        pub_comment = (
-            f"{content.first_comment_hook} 👇\n"
-            f"{blogger_url}"
-        )
-    else:
-        pub_post = (
-            f"{content.facebook_post}\n\n"
-            f"{CTA_LINE}\n"
-            f"{{BLOGGER_URL_NOT_PUBLISHED_YET}}"
-        )
-        pub_comment = (
-            f"{content.first_comment_hook} 👇\n"
-            f"{{BLOGGER_URL_NOT_PUBLISHED_YET}}"
-        )
-
-    (fb_dir / "publishable_post.txt").write_text(
-        pub_post,
-        encoding="utf-8",
-    )
-
-    (fb_dir / "publishable_first_comment.txt").write_text(
-        pub_comment,
-        encoding="utf-8",
-    )
-
-    # -----------------------------------------------------------------------
-    # 4. Source Directory
-    # -----------------------------------------------------------------------
+    # 4. source ------------------------------------------------------------
     source_dir = pkg_dir / "source"
     source_dir.mkdir(exist_ok=True)
 
     (source_dir / "source.txt").write_text(
-        (
-            f"Source: {article.source_name}\n"
-            f"Original title: {article.original_title}\n"
-            f"Original URL: {article.original_url}\n"
-        ),
+        f"Source: {article.source_name}\n"
+        f"Original title: {article.original_title}\n"
+        f"Original URL: {article.original_url}\n",
         encoding="utf-8",
     )
+    (source_dir / "source_url.txt").write_text(article.original_url or "", encoding="utf-8")
 
-    (source_dir / "source_url.txt").write_text(
-        article.original_url or "",
-        encoding="utf-8",
-    )
-
-    # -----------------------------------------------------------------------
-    # 5. Interactive Preview HTML & Metadata
-    # -----------------------------------------------------------------------
-    preview_html = _render_preview_html(
-        st,
-        cache,
-        article,
-        content,
-        has_article_img,
-        has_facebook_img,
-    )
-
+    # 5. preview + metadata ------------------------------------------------
     (pkg_dir / "preview.html").write_text(
-        preview_html,
+        _render_preview_html(st, cache, article, content, has_article_img, has_facebook_img),
         encoding="utf-8",
     )
 
-    meta_data = {
+    meta = {
         "story_id": story_id,
         "source_name": article.source_name,
         "source_url": article.original_url,
         "original_title": article.original_title,
         "blogger_title": content.blogger_title,
-        "blogger_url": blogger_url,
+        "blogger_url": _safe_http_url(st.blogger_url),
         "status": st.status,
         "export_status": st.export_status or "ready",
         "facebook_status": st.facebook_status or "pending",
@@ -454,42 +278,15 @@ def create_story_package(
         "seo_description": content.seo_description,
         "labels": content.labels,
         "hashes": {
-            "source_image_hash": (
-                cache.image.source_image_hash
-                if cache.image
-                else ""
-            ),
-            "generated_image_hash": (
-                cache.image.generated_hash
-                if cache.image
-                else ""
-            ),
-            "generated_image_ahash": (
-                cache.image.generated_ahash
-                if cache.image
-                else ""
-            ),
-            "facebook_image_hash": (
-                getattr(cache.image, "facebook_image_hash", "")
-                if cache.image
-                else ""
-            ),
-            "facebook_image_ahash": (
-                getattr(cache.image, "facebook_image_ahash", "")
-                if cache.image
-                else ""
-            ),
+            "source_image_hash": image.source_image_hash if image else "",
+            "generated_image_hash": image.generated_hash if image else "",
+            "generated_image_ahash": image.generated_ahash if image else "",
+            "facebook_image_hash": image.facebook_image_hash if image else "",
+            "facebook_image_ahash": image.facebook_image_ahash if image else "",
         },
     }
 
-    (pkg_dir / "metadata.json").write_text(
-        json.dumps(
-            meta_data,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    (pkg_dir / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     return pkg_dir
 
@@ -500,64 +297,35 @@ def export_bundle(
     cache: StoryCache,
     article: SourceArticle,
 ) -> Path | None:
-    """Create a zipped story package under exports_dir/story_{story_id}.zip.
-
-    Guaranteed non-destructive: catches exceptions and logs warnings without
-    breaking the parent workflow execution.
-    """
+    """Create exports_dir/story_{story_id}.zip. Never raises: failures are logged and None is returned."""
     try:
         exports_dir = Path(exports_dir)
         exports_dir.mkdir(parents=True, exist_ok=True)
 
         story_id = _validate_story_id(st.story_id)
 
-        with tempfile.TemporaryDirectory(
-            dir=str(exports_dir)
-        ) as tmp_staging:
-            staging_path = Path(tmp_staging)
-
-            pkg_dir = create_story_package(
-                staging_path,
-                st,
-                cache,
-                article,
-            )
+        with tempfile.TemporaryDirectory(dir=str(exports_dir)) as tmp:
+            staging = Path(tmp)
+            pkg_dir = create_story_package(staging, st, cache, article)
 
             if not pkg_dir or not pkg_dir.exists():
                 return None
 
-            zip_filename = f"story_{story_id}.zip"
-            final_zip_path = exports_dir / zip_filename
-            tmp_zip_path = staging_path / zip_filename
+            zip_name = f"story_{story_id}.zip"
+            final_zip = exports_dir / zip_name
+            tmp_zip = staging / zip_name
 
-            # Create zip file in staging
-            with zipfile.ZipFile(
-                tmp_zip_path,
-                "w",
-                compression=zipfile.ZIP_DEFLATED,
-            ) as zf:
+            with zipfile.ZipFile(tmp_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for file_path in pkg_dir.rglob("*"):
                     if file_path.is_file():
-                        arcname = file_path.relative_to(pkg_dir)
-                        zf.write(file_path, arcname)
+                        zf.write(file_path, file_path.relative_to(pkg_dir))
 
-            # True atomic replacement on the same filesystem.
-            os.replace(
-                str(tmp_zip_path),
-                str(final_zip_path),
-            )
+            os.replace(str(tmp_zip), str(final_zip))
 
-            logger.log(
-                "EXPORTER",
-                f"created bundle package: {final_zip_path.name}",
-            )
+            logger.log("EXPORTER", f"created bundle package: {final_zip.name}")
 
-            return final_zip_path
+            return final_zip
 
     except Exception as exc:
-        logger.warn(
-            "EXPORTER",
-            f"bundle export failed for {st.story_id} "
-            f"({type(exc).__name__}: {exc})",
-        )
+        logger.warn("EXPORTER", f"bundle export failed for {st.story_id} ({type(exc).__name__}: {exc})")
         return None
