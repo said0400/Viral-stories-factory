@@ -29,16 +29,17 @@ jobs:
     timeout-minutes: 90
 
     env:
-      # Scheduled runs are always LIVE (false). Manual runs follow dry_run input.
+      # Scheduled runs are always LIVE (false).
+      # Manual runs follow the dry_run input.
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
 
       NUMBER_OF_STORIES: ${{ inputs.number_of_stories }}
 
       MANUAL_OVERRIDE: "false"
-      
-      # FIX: Keep GIT_PUSH_ENABLED false during Python execution.
-      # The workflow itself handles the single atomic commit & push at the end.
-      GIT_PUSH_ENABLED: "false"
+
+      # Image publisher needs to push generated images during the
+      # Python execution so that Blogger can receive public image URLs.
+      GIT_PUSH_ENABLED: "true"
 
       TARGET_DAILY_STORIES: ${{ vars.TARGET_DAILY_STORIES || '6' }}
       MAX_STORIES_PER_RUN: ${{ vars.MAX_STORIES_PER_RUN || '3' }}
@@ -66,9 +67,11 @@ jobs:
       WHATSAPP_CONTENT_SID: ${{ secrets.WHATSAPP_CONTENT_SID }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -84,11 +87,16 @@ jobs:
       - name: Run factory
         run: python -m src.main
 
-      # Safety net: persist history/cache/images even if the run stopped midway.
+      # Safety net:
+      # Persist history/cache changes if the factory stops midway.
+      #
+      # Generated images are intentionally NOT added here because
+      # image_publisher.py already pushes them during execution when
+      # GIT_PUSH_ENABLED=true.
       - name: Commit state
         if: always() && env.DRY_RUN != 'true'
         run: |
-          git add data/history.json data/cache data/images || true
+          git add data/history.json data/cache || true
 
           if git diff --cached --quiet; then
             echo "No state changes to commit."
@@ -107,7 +115,8 @@ jobs:
             done
           fi
 
-      # FIX: Upload downloadable story ZIP bundles cleanly per run.
+      # Downloadable story ZIP bundles.
+      # Export failures must never fail the workflow.
       - name: Upload downloadable story bundles
         if: always()
         uses: actions/upload-artifact@v4
