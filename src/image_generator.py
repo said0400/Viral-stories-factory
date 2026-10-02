@@ -68,8 +68,8 @@ def choose_strategy(
     - Real people are never recreated photorealistically.
     - A photo containing incidental people can still be used as a reference
       for a non-human identity-critical subject.
-    - Reference identity is used only when VisualAnalysis explicitly marks
-      the reference as required.
+    - Reference identity is used only when VisualAnalysis marks
+      reference_required (implies identity_critical non-human subject).
     """
 
     subject_type = (
@@ -98,8 +98,7 @@ def choose_strategy(
             else people_style
         )
 
-        # "reference" is NOT used for photorealistic identity recreation
-        # of real people. It is converted to a safe illustrative treatment.
+        # "reference" is NOT photoreal identity recreation of real people.
         if style == "reference":
             style = "illustration"
 
@@ -113,9 +112,6 @@ def choose_strategy(
         "event",
         "scene",
     } and v.contains_real_people:
-        # If the important identity is non-human and the analyzer explicitly
-        # requires a reference, preserve that non-human subject even when
-        # people happen to appear in the source image.
         if (
             has_ref
             and v.reference_required
@@ -144,18 +140,10 @@ def choose_strategy(
     ):
         return "reference_identity", "photorealistic"
 
-    # --------------------------------------------------------------
-    # Reference requested but identity confidence is insufficient
-    # --------------------------------------------------------------
-    if (
-        has_ref
-        and v.reference_required
-    ):
+    # Reference requested with medium confidence path
+    if has_ref and v.reference_required:
         return "reference_identity", "photorealistic"
 
-    # --------------------------------------------------------------
-    # Safe editorial fallback
-    # --------------------------------------------------------------
     return "editorial", "editorial illustration"
 
 
@@ -171,10 +159,7 @@ def build_prompt(
     """
     Build a provider-neutral image prompt.
 
-    The prompt explicitly separates:
-    - identity-critical information
-    - scene/composition information
-    - safety restrictions around real people
+    Separates identity-critical info, scene/composition, and people safety.
     """
 
     base = [
@@ -198,9 +183,6 @@ def build_prompt(
         else "other"
     )
 
-    # --------------------------------------------------------------
-    # Reference-aware identity generation
-    # --------------------------------------------------------------
     if strategy == "reference_identity":
         keep = (
             "; ".join(v.identity_features[:12])
@@ -247,9 +229,6 @@ def build_prompt(
                 ),
             ]
 
-    # --------------------------------------------------------------
-    # People-safe generation
-    # --------------------------------------------------------------
     elif strategy == "people_safe":
         if style == "faceless":
             base += [
@@ -259,9 +238,7 @@ def build_prompt(
                     "cropped without faces, or sufficiently far away that "
                     "faces are not visible."
                 ),
-                (
-                    "No recognizable or reconstructed real person's face."
-                ),
+                "No recognizable or reconstructed real person's face.",
                 (
                     "Focus on the place, objects, atmosphere and supported "
                     "context of the story."
@@ -282,15 +259,9 @@ def build_prompt(
                     "Any people must be generic stylised figures with "
                     "simplified non-identifying features."
                 ),
-                (
-                    "They must NOT resemble any real individual."
-                ),
-                (
-                    "Do not depict or reconstruct a real person's face."
-                ),
-                (
-                    "Do not invent factual details about the people."
-                ),
+                "They must NOT resemble any real individual.",
+                "Do not depict or reconstruct a real person's face.",
+                "Do not invent factual details about the people.",
             ]
 
         if v.scene_features:
@@ -300,9 +271,6 @@ def build_prompt(
                 + "."
             )
 
-    # --------------------------------------------------------------
-    # Editorial illustration
-    # --------------------------------------------------------------
     else:
         base += [
             f"Editorial illustration of: {scene_idea}.",
@@ -310,18 +278,13 @@ def build_prompt(
                 "The image is illustrative and must not claim to reproduce "
                 "a real event exactly."
             ),
-            (
-                "Use only factual elements supported by the story."
-            ),
+            "Use only factual elements supported by the story.",
             (
                 "Avoid inventing specific people, objects, locations, "
                 "architecture, clothing, weather, injuries or actions."
             ),
         ]
 
-    # --------------------------------------------------------------
-    # Universal restrictions
-    # --------------------------------------------------------------
     if v.involves_minors:
         base += [
             (
@@ -370,7 +333,6 @@ def validate_image(
     if min(img.size) < 512:
         return False, f"too small {img.size}", None
 
-    # Reject obviously empty / nearly uniform images.
     g = img.convert("L")
     st = ImageStat.Stat(g)
 
@@ -379,7 +341,6 @@ def validate_image(
 
     generated_ahash = ahash(img)
 
-    # The generated image must not simply reproduce the source image.
     if (
         source_ahash
         and hamming(
@@ -389,7 +350,6 @@ def validate_image(
     ):
         return False, "too similar to the source image", None
 
-    # Avoid duplicates against earlier generated images.
     for _, known_ahash in known:
         if (
             known_ahash
@@ -435,7 +395,6 @@ def _save_jpeg(
             optimize=True,
         )
 
-        # Stay under WhatsApp's 5 MB image limit.
         if (
             buf.tell() < 4_500_000
             or q <= 60
@@ -462,7 +421,7 @@ def vlm_check(
     title: str,
     summary: str,
 ) -> tuple[bool, str]:
-    """Use Gemini structured vision validation as a second quality gate."""
+    """Optional second quality gate. Fail-open if the checker is unavailable."""
     try:
         r = gem.generate_json(
             (
@@ -495,8 +454,12 @@ def vlm_check(
         return ok, r.reason
 
     except GeminiError:
-        # Image generation should not fail solely because the optional
-        # secondary VLM check is unavailable.
+        return True, "check unavailable (skipped)"
+    except Exception as exc:
+        logger.warn(
+            "IMGCHECK",
+            f"VLM check error ({type(exc).__name__}); skipping",
+        )
         return True, "check unavailable (skipped)"
 
 
@@ -534,45 +497,47 @@ class ImageGenerator:
         summary: str,
     ) -> tuple[str, str, str]:
         """
-        Attempts:
+        Bounded attempts (cost control):
 
-        1. Full prompt + reference.
-        2. Simpler prompt + reference.
-        3. Simple prompt without reference.
+        With reference:
+          1. full prompt + ref
+          2. simple prompt + ref
+          3. simple prompt without ref (editorial fallback)
 
-        If identity-critical generation loses its reference, it falls back
-        to editorial illustration and explicitly does NOT claim identity
-        preservation.
+        Without reference:
+          1. full prompt
+          2. simple prompt
+
+        If reference_identity loses its reference, fall back to editorial
+        and do NOT claim identity preservation.
         """
 
-        plans = (
-            [
+        if ref:
+            plans = [
                 (False, ref),
                 (True, ref),
                 (True, None),
             ]
-            if ref
-            else [
+        else:
+            plans = [
                 (False, None),
                 (True, None),
             ]
-        )
 
+        # Hard cap aligned with gemini_client image budget.
         max_attempts = max(
             1,
-            self.cfg.max_retries + 1,
+            min(
+                len(plans),
+                self.cfg.max_retries + 1,
+                3,
+            ),
         )
 
         for i, (simple, r) in enumerate(
-            plans,
+            plans[:max_attempts],
             1,
         ):
-            if i > max_attempts:
-                break
-
-            # A reference_identity strategy without an actual reference
-            # must never claim that the generated subject is the same
-            # real-world subject.
             if (
                 strategy == "reference_identity"
                 and r is None
@@ -599,7 +564,7 @@ class ImageGenerator:
                     (
                         f"{kind}: generating "
                         f"({strat}/{sty}, "
-                        f"attempt {i}, "
+                        f"attempt {i}/{max_attempts}, "
                         f"ref={'yes' if r else 'no'})"
                     ),
                 )
@@ -675,7 +640,6 @@ class ImageGenerator:
                         f"{kind}: relevance check failed ({reason})",
                     )
 
-                    # Do not leave a rejected image behind.
                     try:
                         out_path.unlink(
                             missing_ok=True
@@ -717,6 +681,10 @@ class ImageGenerator:
     ) -> ImageResult:
         """
         Generate the main article image and optionally a separate Facebook image.
+
+        Filenames are unique per story:
+          {story_id}_generated.jpg
+          {story_id}_facebook.jpg
         """
 
         strategy, style = choose_strategy(
@@ -725,10 +693,6 @@ class ImageGenerator:
             self.cfg.people_image_style,
         )
 
-        # Identity preservation is claimed only when:
-        # 1. strategy is reference_identity,
-        # 2. a real reference exists,
-        # 3. the analyzer marked the reference as identity-relevant.
         confidence = (
             v.identity_confidence
             if (
@@ -779,12 +743,13 @@ class ImageGenerator:
             notes=(
                 "Identity preservation depends on provider/model "
                 f"capabilities; used={used}; "
-                f"reference_used={'yes' if source_ref and strategy == 'reference_identity' else 'no'}"
+                f"reference_used="
+                f"{'yes' if source_ref and strategy == 'reference_identity' else 'no'}"
             ),
         )
 
         # --------------------------------------------------------------
-        # Optional separate Facebook image
+        # Optional separate Facebook image (1:1)
         # --------------------------------------------------------------
         if self.cfg.facebook_separate_image:
             fb_out = (
@@ -793,7 +758,7 @@ class ImageGenerator:
             )
 
             try:
-                self._one(
+                fb_sha, fb_ah, _ = self._one(
                     kind="facebook",
                     strategy=strategy,
                     style=style,
@@ -818,9 +783,9 @@ class ImageGenerator:
                     ),
                 )
 
-                res.facebook_path = str(
-                    fb_out
-                )
+                res.facebook_path = str(fb_out)
+                res.facebook_image_hash = fb_sha
+                res.facebook_image_ahash = fb_ah
 
             except ImageGenError as exc:
                 logger.warn(
@@ -830,8 +795,12 @@ class ImageGenerator:
                 )
 
                 res.facebook_path = res.path
+                res.facebook_image_hash = sha
+                res.facebook_image_ahash = ah
 
         else:
             res.facebook_path = res.path
+            res.facebook_image_hash = sha
+            res.facebook_image_ahash = ah
 
         return res
