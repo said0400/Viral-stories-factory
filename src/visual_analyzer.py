@@ -15,10 +15,12 @@ SUBJECT_TYPES = {"person", "place", "animal", "vehicle", "object", "building",
 
 VISUAL_SYSTEM = """You analyse a news/story photo to prepare a NEW illustration of the same story.
 Separate IDENTITY features (must stay the same: species/breed/markings, vehicle make/colour/damage, building/place architecture & landmarks, object shape/colour) from SCENE features (pose, angle, lighting, background, moment) that may change.
-Be factual: describe only what is visible. Never name or guess the identity of any real person. Do NOT describe facial features of people; for people only note that they are present (and whether any appear to be children).
+Be factual: describe only what is visible. Never identify, name, or guess a real person's identity.
+Do not invent facial, biographical, or personal attributes.
+When the main subject is a real person and reference-preserving generation is permitted, describe only visible non-sensitive visual attributes that are actually supported by the reference image, such as clothing, hairstyle, accessories, pose, approximate presentation, and surrounding context. for people only note that they are present (and whether any appear to be children).
 subject_type must be one of: person, place, animal, vehicle, object, building, event, scene, multiple_subjects, other.
 contains_real_people=true if any real human is visible. involves_minors=true if any child/teen appears.
-identity_confidence: low/medium/high = how well this single image supports recreating the NON-HUMAN subject faithfully."""
+identity_confidence: low/medium/high = how well this single reference image supports faithful recreation of the main subject without inventing unsupported details."""
 
 
 def ahash(img: Image.Image) -> str:
