@@ -20,6 +20,14 @@ class BloggerError(Exception):
     pass
 
 
+def _https(u: str) -> str:
+    """Ensure Blogger URL is https:// for Facebook's strict requirements."""
+    u = (u or "").strip()
+    if u.startswith("http://"):
+        return "https://" + u[7:]
+    return u
+
+
 class BloggerClient:
     def __init__(self, cfg: Settings) -> None:
         self.cfg = cfg
@@ -74,19 +82,17 @@ class BloggerClient:
         except ValueError as exc:
             raise BloggerError("posts.get returned invalid JSON") from exc
 
-    def find_by_story_id(self, story_id: str, title: str) -> BloggerResult | None:
+    def find_by_story_id(self, story_id: str) -> BloggerResult | None:
         """
         Idempotency probe.
 
-        Scan recent posts for our hidden story_id marker first, while also
-        retaining exact-title matching as a backward-compatible fallback.
+        Scan recent posts for our hidden story_id marker.
+        Capped at 3 pages to avoid excessive network strain on busy blogs.
         """
         marker = f"story_id:{story_id}"
         token = ""
 
-        # Scan more than the original 60 posts so a delayed run or a busy
-        # Blogger account is less likely to create a duplicate.
-        for _ in range(10):
+        for _ in range(3):
             params = {
                 "maxResults": 50,
                 "orderBy": "published",
@@ -126,13 +132,13 @@ class BloggerClient:
 
             for p in data.get("items", []):
                 content = p.get("content") or ""
-                post_title = (p.get("title") or "").strip()
 
-                if marker in content or post_title == title.strip():
+                # Only use the strict marker to avoid collision with similar titles.
+                if marker in content:
                     if p.get("status", "LIVE").upper() == "LIVE" and p.get("url"):
                         return BloggerResult(
                             post_id=p["id"],
-                            url=p["url"],
+                            url=_https(p["url"]),
                             published_at=p.get("published", iso()),
                         )
 
@@ -143,25 +149,26 @@ class BloggerClient:
         return None
 
     # ---- publish ---------------------------------------------------------
-    def verify(self, post_id: str) -> BloggerResult:
+    def verify(self, post_id: str, retries: int = 3) -> BloggerResult:
         """
         Verify that Blogger actually exposes the post as LIVE and that a
-        public URL is available.
+        public URL is available. Handles Blogger consistency lag by retrying
+        404s briefly.
         """
-        p = self.get_post(post_id)
+        for i in range(retries):
+            p = self.get_post(post_id)
 
-        if (
-            not p
-            or not p.get("url")
-            or p.get("status", "LIVE").upper() != "LIVE"
-        ):
-            raise BloggerError("post not live / URL missing after publish")
+            if p and p.get("url") and p.get("status", "LIVE").upper() == "LIVE":
+                return BloggerResult(
+                    post_id=p["id"],
+                    url=_https(p["url"]),
+                    published_at=p.get("published", iso()),
+                )
 
-        return BloggerResult(
-            post_id=p["id"],
-            url=p["url"],
-            published_at=p.get("published", iso()),
-        )
+            if i < retries - 1:
+                time.sleep(2 * (i + 1))
+
+        raise BloggerError("post not live / URL missing after publish and lag-wait")
 
     def publish(
         self,
@@ -174,12 +181,8 @@ class BloggerClient:
     ) -> BloggerResult:
         """
         Publish one Blogger post idempotently.
-
-        The story marker is expected to already exist inside the generated
-        HTML. If an earlier request succeeded but the response was lost,
-        the idempotency probe finds the existing post before another insert.
         """
-        existing = self.find_by_story_id(story_id, title)
+        existing = self.find_by_story_id(story_id)
 
         if existing:
             logger.log(
@@ -221,13 +224,20 @@ class BloggerClient:
                         raise BloggerError(
                             "posts.insert succeeded but no post ID was returned"
                         )
-
+                    
+                    url = data.get("url")
+                    if url and data.get("status", "LIVE").upper() == "LIVE":
+                        return BloggerResult(
+                            post_id=post_id,
+                            url=_https(url),
+                            published_at=data.get("published", iso()),
+                        )
+                    
+                    # Fallback to verification if the insert response lacked the URL
                     return self.verify(post_id)
 
                 last = f"HTTP {r.status_code}"
 
-                # Authentication, permission, malformed-request and
-                # not-found errors are not useful to retry immediately.
                 if r.status_code in (400, 401, 403, 404):
                     detail = ""
                     try:
@@ -240,16 +250,20 @@ class BloggerClient:
                         + (f": {detail}" if detail else "")
                     )
 
+                # Honor Retry-After if provided
+                if r.status_code in (429, 503):
+                    ra = r.headers.get("Retry-After", "").strip()
+                    if ra.isdigit():
+                        time.sleep(min(60, max(5, int(ra))))
+                        continue
+
             except (requests.Timeout, requests.ConnectionError) as exc:
                 last = type(exc).__name__
 
             if attempt < self.cfg.max_retries:
-                # A timeout/connection failure does NOT prove that Blogger
-                # rejected the request. Wait briefly, then perform another
-                # idempotency probe before sending another insert.
                 time.sleep(min(30, 3 * 2 ** attempt))
 
-                found = self.find_by_story_id(story_id, title)
+                found = self.find_by_story_id(story_id)
 
                 if found:
                     logger.log(
@@ -263,9 +277,7 @@ class BloggerClient:
                     f"publish attempt {attempt + 1} failed ({last}); retrying",
                 )
 
-        # Final safety probe: the last request may have reached Blogger even
-        # if the client did not receive a successful response.
-        found = self.find_by_story_id(story_id, title)
+        found = self.find_by_story_id(story_id)
 
         if found:
             logger.log(
