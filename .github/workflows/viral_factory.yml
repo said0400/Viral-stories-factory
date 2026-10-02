@@ -36,8 +36,8 @@ jobs:
       MAX_SOURCE_AGE_HOURS: ${{ vars.MAX_SOURCE_AGE_HOURS || '48' }}
       PEOPLE_IMAGE_STYLE: ${{ vars.PEOPLE_IMAGE_STYLE || 'illustration' }}
       DAY_TIMEZONE: ${{ vars.DAY_TIMEZONE || 'Africa/Casablanca' }}
-      GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3-flash-preview' }}
-      GEMINI_IMAGE_MODEL: ${{ vars.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image' }}
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.8-flash' }}
+      GEMINI_IMAGE_MODEL: ${{ vars.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-image' }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       IMAGE_API_KEY: ${{ secrets.IMAGE_API_KEY }}
       BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
