@@ -43,8 +43,8 @@ class Settings:
     day_timezone: str = "Africa/Casablanca"
 
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-3-flash-preview"
-    gemini_image_model: str = "gemini-2.5-flash-image"
+    gemini_model: str = "gemini-3.8-flash"
+    gemini_image_model: str = "gemini-3.1-flash-image"
     image_api_key: str = ""
 
     blogger_blog_id: str = ""
@@ -58,7 +58,7 @@ class Settings:
     your_personal_number: str = ""
     whatsapp_content_sid: str = ""
 
-    people_image_style: str = "illustration"  # illustration | faceless
+    people_image_style: str = "reference"  # illustration | faceless
     facebook_separate_image: bool = True
     image_public_base_url: str = ""
     image_vlm_check: bool = True
@@ -108,7 +108,7 @@ class Settings:
             twilio_whatsapp_number=_str("TWILIO_WHATSAPP_NUMBER"),
             your_personal_number=_str("YOUR_PERSONAL_NUMBER"),
             whatsapp_content_sid=_str("WHATSAPP_CONTENT_SID"),
-            people_image_style=_str("PEOPLE_IMAGE_STYLE", "illustration").lower(),
+            people_image_style=_str("PEOPLE_IMAGE_STYLE", "reference").lower(),
             facebook_separate_image=_bool("FACEBOOK_SEPARATE_IMAGE", True),
             image_public_base_url=_str("IMAGE_PUBLIC_BASE_URL").rstrip("/"),
             image_vlm_check=_bool("IMAGE_VLM_CHECK", True),
@@ -166,7 +166,12 @@ class Settings:
         problems: list[str] = []
         if not self.gemini_api_key:
             problems.append("GEMINI_API_KEY is missing")
-        if self.people_image_style not in {"illustration", "faceless"}:
+        if self.people_image_style not in {"reference", "illustration", "faceless"}:
+           problems.append(
+               "PEOPLE_IMAGE_STYLE must be 'reference', 'illustration' or 'faceless'"
+           )
+
+        
             problems.append("PEOPLE_IMAGE_STYLE must be 'illustration' or 'faceless'")
         if need_publish:
             for name, val in [("BLOGGER_BLOG_ID", self.blogger_blog_id),
