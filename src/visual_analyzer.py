@@ -82,7 +82,14 @@ def analyze(gem: GeminiClient, article: SourceArticle, image: tuple[bytes, str] 
         return VisualAnalysis(subject_type="scene", identity_confidence="low",
                               new_scene_direction="editorial illustration of the story's scene")
     st = res.subject_type if res.subject_type in SUBJECT_TYPES else "other"
-    non_human_identity = st in {"place", "animal", "vehicle", "object", "building"}
+    reference_identity_types = {
+    "person",
+    "place",
+    "animal",
+    "vehicle",
+    "object",
+    "building",
+}
     return VisualAnalysis(
         subject_type=st,
         identity_critical=res.identity_critical and non_human_identity,
