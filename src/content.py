@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html as html_lib
 import re
+from typing import Callable
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Comment
@@ -284,48 +285,26 @@ If an image idea describes a specific factual element not supported by the sourc
 Return only claims that genuinely require correction.
 If everything is supported, return an empty unsupported_claims list and all_claims_supported=true."""
 
+_URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+_PLACEHOLDER_RE = re.compile(r"\{BLOGGER_URL\}")
+_DISCLOSURE = "الصورة المرفقة مُولَّدة بالذكاء الاصطناعي لأغراض توضيحية."
+
 
 # ---------------------------------------------------------------- sanitising
-
 def sanitize_html(raw: str) -> str:
-    """
-    Allow-list HTML sanitiser.
-
-    Removes executable/dangerous elements, comments, attributes and unknown
-    tags while preserving the text/content of harmless unknown wrappers.
-    """
+    """Allow-list HTML sanitiser (no attributes, no unknown tags, no comments)."""
     if not raw:
         return ""
 
     soup = BeautifulSoup(str(raw), "lxml")
 
-    # Remove comments explicitly. This prevents model-generated HTML comments
-    # from surviving into the article body.
-    for comment in soup.find_all(
-        string=lambda value: isinstance(value, Comment)
-    ):
+    for comment in soup.find_all(string=lambda v: isinstance(v, Comment)):
         comment.extract()
 
-    # Remove dangerous or explicitly forbidden elements.
     for tag in soup.find_all(
         [
-            "script",
-            "style",
-            "iframe",
-            "object",
-            "embed",
-            "form",
-            "img",
-            "a",
-            "meta",
-            "link",
-            "base",
-            "svg",
-            "math",
-            "video",
-            "audio",
-            "source",
-            "picture",
+            "script", "style", "iframe", "object", "embed", "form", "img", "a",
+            "meta", "link", "base", "svg", "math", "video", "audio", "source", "picture",
         ]
     ):
         if tag.name == "a":
@@ -333,7 +312,6 @@ def sanitize_html(raw: str) -> str:
         else:
             tag.decompose()
 
-    # Remove document-level wrappers and enforce the allow-list.
     for tag in list(soup.find_all(True)):
         name = str(tag.name or "").lower()
 
@@ -341,15 +319,16 @@ def sanitize_html(raw: str) -> str:
             tag.unwrap()
             continue
 
+        if name == "h1":
+            tag.name = "h2"
+            name = "h2"
+
         if name not in ALLOWED_TAGS:
             tag.unwrap()
             continue
 
-        # No attributes are allowed on article-generated tags.
         tag.attrs = {}
 
-    # BeautifulSoup can leave doctype/document artefacts depending on input.
-    # Work only with the resulting body/content nodes.
     body = soup.body
 
     if body is not None:
@@ -358,13 +337,15 @@ def sanitize_html(raw: str) -> str:
     return "".join(str(child) for child in soup.contents).strip()
 
 
-def _safe_story_id(story_id: str) -> str:
-    """
-    Validate and normalise the story ID used in the Blogger idempotency marker.
+def _strip_urls(text: str) -> str:
+    value = _PLACEHOLDER_RE.sub("", str(text or ""))
+    value = _URL_RE.sub("", value)
+    value = re.sub(r"[ \t]{2,}", " ", value)
+    return value.strip()
 
-    The marker is intentionally simple because history.py and blogger.py use
-    the exact same `story_id:<id>` convention.
-    """
+
+def _safe_story_id(story_id: str) -> str:
+    """Same `story_id:<id>` convention is used by history.py and blogger.py."""
     value = str(story_id or "").strip()
 
     if not value:
@@ -380,10 +361,7 @@ def _safe_story_id(story_id: str) -> str:
 
 
 def _safe_source_host(source_url: str) -> str:
-    """Return a safe display hostname for the attribution line."""
-    parsed_url = urlparse(source_url or "")
-
-    host = (parsed_url.hostname or "").strip().lower()
+    host = (urlparse(source_url or "").hostname or "").strip().lower()
 
     if not host:
         return "source"
@@ -395,12 +373,6 @@ def _safe_source_host(source_url: str) -> str:
 
 
 def _safe_source_url(source_url: str) -> str:
-    """
-    Return a source URL only when it is a normal HTTP(S) URL.
-
-    The article source URL originates from discovery, but this validation
-    prevents malformed schemes from being emitted into the final Blogger HTML.
-    """
     value = str(source_url or "").strip()
 
     if not value:
@@ -411,10 +383,7 @@ def _safe_source_url(source_url: str) -> str:
     except ValueError:
         return ""
 
-    if parsed.scheme not in ("http", "https"):
-        return ""
-
-    if not parsed.netloc:
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return ""
 
     if parsed.username or parsed.password:
@@ -423,77 +392,79 @@ def _safe_source_url(source_url: str) -> str:
     return value
 
 
+def _safe_image_src(value: str) -> str:
+    """Accept https/http URLs, inline JPEG/PNG data URIs, and the exporter's relative path."""
+    src = str(value or "").strip()
+
+    if not src:
+        return ""
+
+    if src.startswith(("data:image/jpeg;base64,", "data:image/png;base64,")):
+        return src
+
+    if src.startswith("../images/"):
+        return src
+
+    try:
+        parsed = urlparse(src)
+    except ValueError:
+        return ""
+
+    if parsed.scheme in ("http", "https") and parsed.netloc:
+        return src
+
+    return ""
+
+
 def render_blogger_html(
     content: GeneratedContent,
     article: SourceArticle,
     image_url: str,
     story_id: str,
 ) -> str:
-    """
-    Final Blogger HTML:
-    image + sanitised body + attribution + hidden idempotency marker.
-    """
+    """Final Blogger HTML: image + sanitised body + attribution + hidden idempotency marker."""
     safe_story_id = _safe_story_id(story_id)
-
     body = sanitize_html(content.blogger_html)
+
+    img_src = _safe_image_src(image_url)
+    img = ""
+
+    if img_src:
+        img = (
+            '<figure style="margin:0 0 1.2em;text-align:center">'
+            f'<img src="{html_lib.escape(img_src, quote=True)}" '
+            f'alt="{html_lib.escape(content.blogger_title, quote=True)}" '
+            'style="max-width:100%;height:auto" loading="lazy"/></figure>'
+        )
+
+    disclosure = f"<p><em>{_DISCLOSURE}</em></p>" if img else ""
 
     source_url = _safe_source_url(article.original_url)
 
     if source_url:
-        host = _safe_source_host(source_url)
-
         src = (
-            f'<p><strong>المصدر:</strong> '
+            "<p><strong>المصدر:</strong> "
             f'<a href="{html_lib.escape(source_url, quote=True)}" '
-            f'rel="nofollow noopener" target="_blank">'
-            f'{html_lib.escape(article.source_name)}</a> '
-            f'({host})</p>'
-            f'<p><em>'
-            f'الصورة المرفقة مُولَّدة بالذكاء الاصطناعي لأغراض توضيحية.'
-            f'</em></p>'
+            'rel="nofollow noopener" target="_blank">'
+            f"{html_lib.escape(article.source_name)}</a> "
+            f"({_safe_source_host(source_url)})</p>"
+            f"{disclosure}"
         )
     else:
         src = (
-            f'<p><strong>المصدر:</strong> '
-            f'{html_lib.escape(article.source_name or "المصدر")}</p>'
-            f'<p><em>'
-            f'الصورة المرفقة مُولَّدة بالذكاء الاصطناعي لأغراض توضيحية.'
-            f'</em></p>'
+            f"<p><strong>المصدر:</strong> {html_lib.escape(article.source_name or 'المصدر')}</p>"
+            f"{disclosure}"
         )
 
-    safe_image_url = str(image_url or "").strip()
-
-    img = ""
-
-    if safe_image_url:
-        try:
-            parsed_image = urlparse(safe_image_url)
-
-            if parsed_image.scheme in ("http", "https") and parsed_image.netloc:
-                img = (
-                    f'<figure style="margin:0 0 1.2em;text-align:center">'
-                    f'<img src="'
-                    f'{html_lib.escape(safe_image_url, quote=True)}" '
-                    f'alt="'
-                    f'{html_lib.escape(content.blogger_title, quote=True)}" '
-                    f'style="max-width:100%;height:auto" '
-                    f'loading="lazy"/></figure>'
-                )
-        except ValueError:
-            img = ""
-
     return (
-        f'<div dir="rtl" style="text-align:right">'
-        f'{img}'
-        f'{body}'
-        f'{src}'
-        f'</div>'
-        f'<!-- story_id:{html_lib.escape(safe_story_id, quote=False)} -->'
+        '<div dir="rtl" style="text-align:right">'
+        f"{img}{body}{src}"
+        "</div>"
+        f"<!-- story_id:{html_lib.escape(safe_story_id, quote=False)} -->"
     )
 
 
 # ---------------------------------------------------------------- triage
-
 def triage(
     gem: GeminiClient,
     candidates: list[SourceArticle],
@@ -505,25 +476,10 @@ def triage(
     lines = []
 
     for i, c in enumerate(candidates):
-        age = (
-            c.publication_date.date().isoformat()
-            if c.publication_date
-            else "unknown"
-        )
+        age = c.publication_date.date().isoformat() if c.publication_date else "unknown"
+        lines.append(f"[{i}] ({c.source_name}, {age}) {c.original_title} — {c.description[:220]}")
 
-        lines.append(
-            f"[{i}] ({c.source_name}, {age}) "
-            f"{c.original_title} — {c.description[:220]}"
-        )
-
-    pub = (
-        "\n".join(
-            f"- {t}"
-            for t in published_titles[:60]
-            if str(t).strip()
-        )
-        or "(none)"
-    )
+    pub = "\n".join(f"- {t}" for t in published_titles[:60] if str(t).strip()) or "(none)"
 
     prompt = (
         "CANDIDATE STORIES:\n"
@@ -537,18 +493,11 @@ def triage(
         "describing the same event/people/place, else -1.\n"
         "Never point duplicate_of to itself or to a later candidate.\n"
         "event_key = people+place+event in a few concise English words.\n"
-        "suitable=false for politics, tragedy, graphic, unverifiable "
-        "or boring items.\n"
+        "suitable=false for politics, tragedy, graphic, unverifiable or boring items.\n"
         "is_evergreen=true if the story remains interesting regardless of date."
     )
 
-    res = gem.generate_json(
-        prompt,
-        TriageResult,
-        system=TRIAGE_SYSTEM,
-        temperature=0.2,
-        tag="TRIAGE",
-    )
+    res = gem.generate_json(prompt, TriageResult, system=TRIAGE_SYSTEM, temperature=0.2, tag="TRIAGE")
 
     out: dict[int, TriageItem] = {}
 
@@ -564,44 +513,25 @@ def triage(
             "originality_score",
             "emotional_score",
         ):
-            value = getattr(it, field, 0)
-
             try:
-                value = int(value)
+                value = int(getattr(it, field, 0))
             except (TypeError, ValueError):
                 value = 0
 
-            setattr(
-                it,
-                field,
-                max(0, min(100, value)),
-            )
-
-        # duplicate_of must be an earlier candidate and cannot refer to
-        # itself. Invalid references are converted to "no duplicate".
-        duplicate_of = getattr(it, "duplicate_of", -1)
+            setattr(it, field, max(0, min(100, value)))
 
         try:
-            duplicate_of = int(duplicate_of)
+            duplicate_of = int(getattr(it, "duplicate_of", -1))
         except (TypeError, ValueError):
             duplicate_of = -1
 
-        if (
-            duplicate_of < 0
-            or duplicate_of >= len(candidates)
-            or duplicate_of >= it.index
-        ):
+        if duplicate_of < 0 or duplicate_of >= len(candidates) or duplicate_of >= it.index:
             duplicate_of = -1
 
         it.duplicate_of = duplicate_of
 
-        # Keep event_key compact and safe for downstream logs/selection.
         event_key = str(getattr(it, "event_key", "") or "").strip()
-
-        if len(event_key) > 160:
-            event_key = event_key[:160].rstrip()
-
-        it.event_key = event_key
+        it.event_key = event_key[:160].rstrip()
 
         out[it.index] = it
 
@@ -621,7 +551,6 @@ def rank_score(item: TriageItem) -> float:
 
 
 # ---------------------------------------------------------------- generation
-
 def generate_content(
     gem: GeminiClient,
     article: SourceArticle,
@@ -629,41 +558,43 @@ def generate_content(
     feedback: str = "",
 ) -> GeneratedContent:
     text = article.article_text or article.description
+    date = article.publication_date.date() if article.publication_date else "unknown"
 
     prompt = (
         f"SOURCE: {article.source_name}\n"
         f"SOURCE TITLE: {article.original_title}\n"
-        f"SOURCE DATE: "
-        f"{article.publication_date.date() if article.publication_date else 'unknown'}\n"
+        f"SOURCE DATE: {date}\n"
         f"SOURCE TEXT:\n{text[:9000]}\n\n"
-        "TITLES ALREADY USED "
-        "(do not repeat or closely resemble):\n"
-        + "\n".join(
-            f"- {t}"
-            for t in avoid_titles[:40]
-            if str(t).strip()
-        )
+        "TITLES ALREADY USED (do not repeat or closely resemble):\n"
+        + "\n".join(f"- {t}" for t in avoid_titles[:40] if str(t).strip())
         + (
-            "\n\nCORRECTIONS REQUIRED FROM THE FACT CHECKER "
-            "(remove or fix these claims):\n"
+            "\n\nCORRECTIONS REQUIRED (remove or fix these claims / follow these instructions):\n"
             + feedback
             if feedback
             else ""
         )
     )
 
-    # Temperature set to 0.5 for better factual accuracy.
-    res = gem.generate_json(
-        prompt,
-        ContentSchema,
-        system=CONTENT_SYSTEM,
-        temperature=0.5,
-        tag="CONTENT",
-    )
+    res = gem.generate_json(prompt, ContentSchema, system=CONTENT_SYSTEM, temperature=0.5, tag="CONTENT")
 
-    return GeneratedContent(
-        **res.model_dump()
-    )
+    data = res.model_dump()
+
+    data["blogger_title"] = _strip_urls(data["blogger_title"])
+    data["facebook_title"] = _strip_urls(data["facebook_title"])
+    data["facebook_post"] = _strip_urls(data["facebook_post"])
+    data["first_comment_hook"] = _strip_urls(data["first_comment_hook"])
+    data["seo_description"] = str(data["seo_description"] or "").strip()[:155].rstrip()
+
+    labels: list[str] = []
+
+    for label in data.get("labels") or []:
+        label = str(label).strip()
+        if label and label not in labels:
+            labels.append(label)
+
+    data["labels"] = labels[:5] or ["قصص غريبة"]
+
+    return GeneratedContent(**data)
 
 
 def fact_check(
@@ -671,131 +602,72 @@ def fact_check(
     article: SourceArticle,
     content: GeneratedContent,
 ) -> FactCheckSchema:
-    plain = BeautifulSoup(
-        content.blogger_html,
-        "lxml",
-    ).get_text(" ")
+    plain = BeautifulSoup(content.blogger_html, "lxml").get_text(" ")
 
     prompt = (
-        f"SOURCE TEXT:\n"
-        f"{(article.article_text or article.description)[:9000]}\n\n"
-        f"ARTICLE TITLE:\n"
-        f"{content.blogger_title}\n\n"
-        f"SEO DESCRIPTION:\n"
-        f"{content.seo_description}\n\n"
-        f"ARTICLE BODY:\n"
-        f"{plain[:12000]}\n\n"
-        f"FACEBOOK TITLE:\n"
-        f"{content.facebook_title}\n\n"
-        f"FACEBOOK POST:\n"
-        f"{content.facebook_post}\n\n"
-        f"FIRST COMMENT:\n"
-        f"{content.first_comment_hook}\n\n"
-        f"ARTICLE SCENE IDEA:\n"
-        f"{content.article_scene_idea}\n\n"
-        f"FACEBOOK SCENE IDEA:\n"
-        f"{content.facebook_scene_idea}\n\n"
+        f"SOURCE TEXT:\n{(article.article_text or article.description)[:9000]}\n\n"
+        f"ARTICLE TITLE:\n{content.blogger_title}\n\n"
+        f"SEO DESCRIPTION:\n{content.seo_description}\n\n"
+        f"ARTICLE BODY:\n{plain[:12000]}\n\n"
+        f"FACEBOOK TITLE:\n{content.facebook_title}\n\n"
+        f"FACEBOOK POST:\n{content.facebook_post}\n\n"
+        f"FIRST COMMENT:\n{content.first_comment_hook}\n\n"
+        f"ARTICLE SCENE IDEA:\n{content.article_scene_idea}\n\n"
+        f"FACEBOOK SCENE IDEA:\n{content.facebook_scene_idea}\n\n"
         "Check every factual claim against SOURCE TEXT."
     )
 
-    return gem.generate_json(
-        prompt,
-        FactCheckSchema,
-        system=FACT_SYSTEM,
-        temperature=0.0,
-        tag="FACTCHECK",
-    )
+    return gem.generate_json(prompt, FactCheckSchema, system=FACT_SYSTEM, temperature=0.0, tag="FACTCHECK")
 
 
 def generate_verified(
     gem: GeminiClient,
     article: SourceArticle,
     history_titles: list[str],
-    is_title_taken,
+    is_title_taken: Callable[[str], bool],
 ) -> GeneratedContent:
     """Generate -> fact-check -> corrective regeneration -> title-dedup check."""
-
-    content = generate_content(
-        gem,
-        article,
-        history_titles,
-    )
+    content = generate_content(gem, article, history_titles)
 
     for attempt in range(2):
-        check = fact_check(
-            gem,
-            article,
-            content,
-        )
+        check = fact_check(gem, article, content)
 
-        if (
-            check.all_claims_supported
-            and not check.unsupported_claims
-        ):
+        if check.all_claims_supported and not check.unsupported_claims:
             break
 
-        logger.warn(
-            "FACTCHECK",
-            f"{len(check.unsupported_claims)} unsupported claim(s); regenerating",
-        )
+        logger.warn("FACTCHECK", f"{len(check.unsupported_claims)} unsupported claim(s); regenerating")
 
         if attempt == 1:
-            raise ValueError(
-                "content still contains unsupported claims"
-            )
+            raise ValueError("content still contains unsupported claims")
 
-        feedback = "\n".join(
-            f"- {c}"
-            for c in check.unsupported_claims
-        )
-
-        content = generate_content(
-            gem,
-            article,
-            history_titles,
-            feedback=feedback,
-        )
+        feedback = "\n".join(f"- {c}" for c in check.unsupported_claims)
+        content = generate_content(gem, article, history_titles, feedback=feedback)
 
     if is_title_taken(content.blogger_title):
-        logger.warn(
-            "CONTENT",
-            "title too similar to history; asking for a new title",
-        )
+        logger.warn("CONTENT", "title too similar to history; asking for a new title")
 
         content = generate_content(
             gem,
             article,
             history_titles + [content.blogger_title],
             feedback=(
-                "Use a clearly different blogger_title "
-                "and facebook_title while preserving exactly "
-                "the same verified source facts. "
+                "Use a clearly different blogger_title and facebook_title while "
+                "preserving exactly the same verified source facts. "
                 "Do not introduce any new factual claim."
             ),
         )
 
-        final_check = fact_check(
-            gem,
-            article,
-            content,
-        )
+        final_check = fact_check(gem, article, content)
 
-        if (
-            not final_check.all_claims_supported
-            or final_check.unsupported_claims
-        ):
+        if not final_check.all_claims_supported or final_check.unsupported_claims:
             logger.warn(
                 "FACTCHECK",
-                "new title/content regeneration introduced "
+                "title regeneration introduced "
                 f"{len(final_check.unsupported_claims)} unsupported claim(s)",
             )
-            raise ValueError(
-                "title regeneration produced unsupported claims"
-            )
+            raise ValueError("title regeneration produced unsupported claims")
 
         if is_title_taken(content.blogger_title):
-            raise ValueError(
-                "could not obtain a unique title"
-            )
+            raise ValueError("could not obtain a unique title")
 
     return content
