@@ -21,6 +21,11 @@ on:
         type: boolean
         default: false
 
+      dry_run_generate_images:
+        description: "Generate images during a dry run (costs image API calls)"
+        type: boolean
+        default: false
+
 concurrency:
   group: viral-content-factory
   cancel-in-progress: false
@@ -43,6 +48,8 @@ jobs:
       NUMBER_OF_STORIES: ${{ inputs.number_of_stories }}
 
       MANUAL_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && inputs.manual_override || 'false' }}
+
+      DRY_RUN_GENERATE_IMAGES: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run_generate_images || 'false' }}
 
       # Images are pushed during execution so Blogger receives public URLs.
       # Never push anything during a dry run.
