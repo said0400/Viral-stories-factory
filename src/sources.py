@@ -1,8 +1,4 @@
-"""Source definitions + discovery: RSS -> sitemap -> section pages (web extraction last).
-
-NOTE: the endpoint URLs below are best-effort defaults and some sites change or block them.
-Every method is robots.txt-aware and failure-isolated; override with SOURCES_OVERRIDE_FILE.
-"""
+"""Source definitions + discovery: RSS -> sitemap -> section pages (web extraction last)."""
 from __future__ import annotations
 
 import json
@@ -103,8 +99,13 @@ def load_sources(override_file: str = "") -> list[SourceDef]:
                     continue
 
                 try:
-                    sources.append(SourceDef(**item))
-                except TypeError as exc:
+                    s_def = SourceDef(**item)
+                    # Clamp max_items
+                    s_def.max_items = max(1, s_def.max_items)
+                    # Test regex validity
+                    re.compile(s_def.article_path_regex)
+                    sources.append(s_def)
+                except (TypeError, re.error) as exc:
                     logger.warn(
                         "DISCOVERY",
                         f"ignoring invalid source override entry ({exc})",
@@ -130,11 +131,11 @@ def load_sources(override_file: str = "") -> list[SourceDef]:
 def _same_domain(src: SourceDef, url: str) -> bool:
     """Return True only when URL belongs to the configured source domain."""
     try:
-        host = (urlparse(url).hostname or "").lower().rstrip(".")
+        host = (urlparse(url).hostname or "").lower().strip().rstrip(".")
     except ValueError:
         return False
 
-    domain = src.domain.lower().strip().lower().rstrip(".")
+    domain = src.domain.lower().strip().rstrip(".")
 
     if not host or not domain:
         return False
@@ -164,7 +165,10 @@ def _candidate(
     except ValueError:
         return None
 
-    if not re.search(src.article_path_regex, parsed.path or "/"):
+    try:
+        if not re.search(src.article_path_regex, parsed.path or "/"):
+            return None
+    except re.error:
         return None
 
     normalized = normalize_url(url)
@@ -354,7 +358,7 @@ def from_sitemap(src: SourceDef, fetcher: PoliteFetcher) -> list[SourceArticle]:
     queue = list(src.sitemaps)
     visited_urls: set[str] = set()
 
-    while queue and len(visited_urls) < 4:
+    while queue and len(visited_urls) < 6:
         sm = queue.pop(0)
 
         if sm in visited_urls:
@@ -374,7 +378,7 @@ def from_sitemap(src: SourceDef, fetcher: PoliteFetcher) -> list[SourceArticle]:
             logger.warn("DISCOVERY", f"{src.name}: sitemap parse failed ({exc})")
             continue
 
-        for child in children[:2]:
+        for child in children[:3]:
             if child not in visited_urls and child not in queue:
                 queue.append(child)
 
