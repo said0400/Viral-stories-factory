@@ -58,11 +58,18 @@ class ImageResult(BaseModel):
     strategy: str = ""
     style: str = ""
     identity_confidence: str = "low"
+    
     generated_hash: str = ""
     generated_ahash: str = ""
+    
+    # Traceability for the separate Facebook image
+    facebook_image_hash: str = ""
+    facebook_image_ahash: str = ""
+    
     source_image_url: str = ""
     source_image_hash: str = ""
     source_image_ahash: str = ""
+    
     public_url: str = ""
     facebook_public_url: str = ""
     notes: str = ""
@@ -85,6 +92,8 @@ class WhatsAppResult(BaseModel):
     message_ids: list[str] = Field(default_factory=list)
     used_template: bool = False
     media_sent: bool = False
+    # Will hold tags like "header", "post_1", "post_2", "comment" for partial tracking
+    sent_parts: list[str] = Field(default_factory=list)
 
 
 class StoryState(BaseModel):
@@ -101,11 +110,24 @@ class StoryState(BaseModel):
     blogger_post_id: str = ""
     blogger_url: str = ""
     published_at: str = ""
-    whatsapp_message_id: str = ""
+    
+    # State tracking
     status: str = "discovered"
     image_status: str = ""
     facebook_status: str = ""
+    
+    # WhatsApp tracking
     whatsapp_status: str = ""
+    whatsapp_message_id: str = ""  # Kept for backward compatibility
+    whatsapp_message_ids: list[str] = Field(default_factory=list)
+    whatsapp_sent_parts: list[str] = Field(default_factory=list)
+    
+    # Export / Offline bundle tracking
+    export_status: str = "pending"  # pending | ready | failed
+    bundle_path: str = ""
+    export_created_at: str = ""
+    export_error: str = ""
+    
     error: str = ""
 
     # extras: traceability / recovery
@@ -114,9 +136,11 @@ class StoryState(BaseModel):
     identity_confidence: str = ""
     source_image_url: str = ""
     source_image_hash: str = ""
+    source_image_ahash: str = ""
     generated_image_path: str = ""
     generated_image_hash: str = ""
     generated_image_ahash: str = ""
+    
     attempts: int = 0
     failed_stage: str = ""
     updated_at: str = ""
