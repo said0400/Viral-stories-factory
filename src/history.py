@@ -1,20 +1,18 @@
 """History store: story IDs, dedup layers 1-2, status machine, daily quota, recovery."""
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import logger
 from .models import StoryCache, StoryState
-from .utils import atomic_write_json, iso, normalize_title, title_similarity, utcnow
+from .utils import atomic_write_json, iso, title_similarity, utcnow
 
 
 # ---------------------------------------------------------------------------
 # Status machine
 # ---------------------------------------------------------------------------
-
 DISCOVERED, SELECTED, GENERATED = (
     "discovered",
     "selected",
@@ -40,9 +38,9 @@ IMAGE_FAILED, BLOGGER_FAILED, WHATSAPP_FAILED = (
 )
 
 
-# A story counts toward the daily publishing quota once Blogger has
-# successfully published it. WhatsApp failure must NOT cause the story
-# to become eligible for another Blogger post.
+# A story counts toward the daily publication quota once Blogger has
+# successfully published it, even if a later promotion/notification stage
+# still needs recovery.
 PUBLISHED_STATES = {
     BLOGGER_PUBLISHED,
     FACEBOOK_READY,
@@ -52,9 +50,7 @@ PUBLISHED_STATES = {
 }
 
 
-# States that may be resumed by a later run instead of starting the story
-# from scratch. In particular, WHATSAPP_FAILED is intentionally resumable
-# so a later run can send WhatsApp without creating another Blogger post.
+# States from which the next scheduled run can safely continue.
 RESUMABLE_STATES = {
     SELECTED,
     GENERATED,
@@ -81,17 +77,19 @@ class History:
         self.rows: dict[str, StoryState] = {}
         self._load()
 
-    # -----------------------------------------------------------------------
-    # Persistence
-    # -----------------------------------------------------------------------
-
+    # ---- persistence -----------------------------------------------------
     def _load(self) -> None:
+        import json
+
         if not self.path.exists():
             return
 
         try:
             raw = json.loads(
-                self.path.read_text(encoding="utf-8") or "[]"
+                self.path.read_text(
+                    encoding="utf-8",
+                )
+                or "[]"
             )
         except json.JSONDecodeError:
             logger.error(
@@ -103,18 +101,18 @@ class History:
         if not isinstance(raw, list):
             logger.error(
                 "HISTORY",
-                "history file has invalid root structure; expected a list",
+                "history root must be a JSON array; refusing to continue",
             )
-            raise ValueError("history file must contain a JSON list")
+            raise ValueError(
+                "history file root must be a JSON array"
+            )
 
         for item in raw:
             try:
                 s = StoryState.model_validate(item)
                 self.rows[s.story_id] = s
             except Exception:
-                # Keep going when one historical row is malformed.
-                # A single damaged row should not make all valid history
-                # unusable.
+                # Keep going on a single bad row.
                 logger.warn(
                     "HISTORY",
                     "skipped an invalid history row",
@@ -124,20 +122,23 @@ class History:
         atomic_write_json(
             self.path,
             [
-                s.model_dump(mode="json")
+                s.model_dump()
                 for s in self.rows.values()
             ],
         )
 
-    # -----------------------------------------------------------------------
-    # Queries
-    # -----------------------------------------------------------------------
-
-    def get(self, story_id: str) -> StoryState | None:
+    # ---- queries ---------------------------------------------------------
+    def get(
+        self,
+        story_id: str,
+    ) -> StoryState | None:
         return self.rows.get(story_id)
 
-    def has_url(self, normalized_url: str) -> bool:
-        """Dedup layer 1: exact normalized source URL."""
+    def has_url(
+        self,
+        normalized_url: str,
+    ) -> bool:
+        """Dedup layer 1."""
         if not normalized_url:
             return False
 
@@ -152,13 +153,13 @@ class History:
         title: str,
         threshold: float = 0.82,
     ) -> StoryState | None:
-        """Dedup layer 2: same source + near-identical original title."""
-        if not source or not title:
-            return None
+        """Dedup layer 2: same source + near-identical title."""
+        source_key = (source or "").strip().casefold()
 
         for s in self.rows.values():
             if (
-                s.source == source
+                (s.source or "").strip().casefold()
+                == source_key
                 and title_similarity(
                     s.original_title,
                     title,
@@ -173,16 +174,6 @@ class History:
         title: str,
         threshold: float = 0.85,
     ) -> bool:
-        """
-        Check whether a generated/published title is too similar to a
-        previous title.
-
-        title_similarity() already normalizes both arguments, so the
-        original title is passed directly.
-        """
-        if not title:
-            return False
-
         return any(
             title_similarity(
                 s.blogger_title or s.original_title,
@@ -191,9 +182,10 @@ class History:
             for s in self.rows.values()
         )
 
-    def recent_titles(self, n: int = 60) -> list[str]:
-        n = max(0, int(n))
-
+    def recent_titles(
+        self,
+        n: int = 60,
+    ) -> list[str]:
         rows = sorted(
             self.rows.values(),
             key=lambda s: s.updated_at,
@@ -209,64 +201,49 @@ class History:
         self,
         now: datetime | None = None,
     ) -> int:
-        """
-        Count stories that reached a published state today in the configured
-        timezone.
+        today = (
+            (now or utcnow())
+            .astimezone(self.tz)
+            .date()
+        )
 
-        WHATSAPP_FAILED is intentionally counted because Blogger has already
-        published the article; only the WhatsApp delivery step failed.
-        """
-        current = now or utcnow()
-
-        if current.tzinfo is None:
-            current = current.replace(tzinfo=self.tz)
-
-        today = current.astimezone(self.tz).date()
-
-        count = 0
+        n = 0
 
         for s in self.rows.values():
             if (
-                s.status not in PUBLISHED_STATES
-                or not s.published_at
+                s.status in PUBLISHED_STATES
+                and s.published_at
             ):
-                continue
-
-            try:
-                published = datetime.fromisoformat(
-                    s.published_at
-                )
-
-                if published.tzinfo is None:
-                    published = published.replace(
-                        tzinfo=self.tz
+                try:
+                    dt = datetime.fromisoformat(
+                        s.published_at,
                     )
 
-                published_date = (
-                    published
-                    .astimezone(self.tz)
-                    .date()
-                )
+                    if dt.tzinfo is None:
+                        dt = dt.replace(
+                            tzinfo=self.tz,
+                        )
 
-            except (TypeError, ValueError, OverflowError):
-                continue
+                    d = (
+                        dt.astimezone(self.tz)
+                        .date()
+                    )
 
-            if published_date == today:
-                count += 1
+                except (
+                    ValueError,
+                    TypeError,
+                ):
+                    continue
 
-        return count
+                if d == today:
+                    n += 1
+
+        return n
 
     def resumable(
         self,
         max_attempts: int,
     ) -> list[StoryState]:
-        """
-        Return unfinished stories that can be resumed.
-
-        Sorting by updated_at makes the oldest pending work resume first.
-        """
-        max_attempts = max(0, int(max_attempts))
-
         out = [
             s
             for s in self.rows.values()
@@ -281,13 +258,9 @@ class History:
             key=lambda s: s.updated_at,
         )
 
-    def image_hashes(self) -> list[tuple[str, str]]:
-        """
-        Return generated image hashes for duplicate-image detection.
-
-        The first value is the cryptographic hash and the second is the
-        perceptual average hash.
-        """
+    def image_hashes(
+        self,
+    ) -> list[tuple[str, str]]:
         return [
             (
                 s.generated_image_hash,
@@ -297,17 +270,13 @@ class History:
             if s.generated_image_hash
         ]
 
-    # -----------------------------------------------------------------------
-    # Mutations
-    # -----------------------------------------------------------------------
-
+    # ---- mutations -------------------------------------------------------
     def upsert(
         self,
         state: StoryState,
         save: bool = True,
     ) -> StoryState:
         state.updated_at = iso()
-
         self.rows[state.story_id] = state
 
         if save:
@@ -324,17 +293,18 @@ class History:
         **fields: str,
     ) -> None:
         state.status = status
-        state.error = (error or "")[:500]
+        state.error = error[:500]
 
         for k, v in fields.items():
-            setattr(state, k, v)
+            setattr(
+                state,
+                k,
+                v,
+            )
 
         self.upsert(state)
 
-    # -----------------------------------------------------------------------
-    # Per-story cache
-    # -----------------------------------------------------------------------
-
+    # ---- per-story cache -------------------------------------------------
     def _cache_path(
         self,
         story_id: str,
@@ -350,7 +320,9 @@ class History:
         if p.exists():
             try:
                 return StoryCache.model_validate_json(
-                    p.read_text(encoding="utf-8")
+                    p.read_text(
+                        encoding="utf-8",
+                    )
                 )
             except Exception:
                 logger.warn(
@@ -367,5 +339,7 @@ class History:
     ) -> None:
         atomic_write_json(
             self._cache_path(story_id),
-            cache.model_dump(mode="json"),
+            cache.model_dump(
+                mode="json",
+            ),
         )
