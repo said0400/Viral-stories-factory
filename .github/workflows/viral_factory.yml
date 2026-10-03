@@ -22,7 +22,7 @@ on:
         default: false
 
       dry_run_generate_images:
-        description: "Generate images during a dry run (costs image API calls)"
+        description: "Generate images during a dry run (uses image provider quota)"
         type: boolean
         default: false
 
@@ -65,14 +65,22 @@ jobs:
       MIN_VIRAL_SCORE: ${{ vars.MIN_VIRAL_SCORE || '60' }}
 
       PEOPLE_IMAGE_STYLE: ${{ vars.PEOPLE_IMAGE_STYLE || 'reference' }}
+      IMAGE_REQUIRED: ${{ vars.IMAGE_REQUIRED || 'true' }}
 
       DAY_TIMEZONE: ${{ vars.DAY_TIMEZONE || 'Africa/Casablanca' }}
 
       GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
       GEMINI_IMAGE_MODEL: ${{ vars.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-lite-image' }}
 
+      IMAGE_PROVIDER: ${{ vars.IMAGE_PROVIDER || 'cloudflare' }}
+      CLOUDFLARE_IMAGE_MODEL: ${{ vars.CLOUDFLARE_IMAGE_MODEL || '@cf/black-forest-labs/flux-2-klein-4b' }}
+      CLOUDFLARE_TIMEOUT: ${{ vars.CLOUDFLARE_TIMEOUT || '300' }}
+
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       IMAGE_API_KEY: ${{ secrets.IMAGE_API_KEY }}
+
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
       BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
       GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
