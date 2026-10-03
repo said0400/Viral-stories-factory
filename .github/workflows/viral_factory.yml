@@ -36,7 +36,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
 
     env:
       PYTHONUNBUFFERED: "1"
@@ -68,7 +68,7 @@ jobs:
 
       DAY_TIMEZONE: ${{ vars.DAY_TIMEZONE || 'Africa/Casablanca' }}
 
-      GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.8-flash' }}
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
       GEMINI_IMAGE_MODEL: ${{ vars.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-lite-image' }}
 
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
