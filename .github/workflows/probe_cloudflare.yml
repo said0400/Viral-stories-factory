@@ -27,7 +27,7 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Run Cloudflare probe
-        run: python scripts/probe_cloudflare.py
+        run: python scripts/probe_cloudflare_ref.py
 
       - name: Upload output
         if: always()
