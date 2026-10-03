@@ -1,4 +1,4 @@
-name: Ask Gemini Models
+name: Probe Cloudflare
 
 on:
   workflow_dispatch:
@@ -13,8 +13,8 @@ jobs:
 
     env:
       PYTHONUNBUFFERED: "1"
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      IMAGE_API_KEY: ${{ secrets.IMAGE_API_KEY }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
     steps:
       - uses: actions/checkout@v4
@@ -26,14 +26,14 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      - name: Run model probe
-        run: python scripts/ask_gemini_models.py
+      - name: Run Cloudflare probe
+        run: python scripts/probe_cloudflare.py
 
       - name: Upload output
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: models-probe-${{ github.run_id }}
+          name: cloudflare-probe-${{ github.run_id }}
           path: probe_out/
           if-no-files-found: ignore
           retention-days: 7
