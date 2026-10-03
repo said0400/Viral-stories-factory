@@ -87,7 +87,7 @@ class Settings:
     day_timezone: str = "Africa/Casablanca"
 
     # --- gemini
-    gemini_model: str = "gemini-3.8-flash"
+    gemini_model: str = "gemini-3.5-flash-lite"
     gemini_fallback_model: str = "gemini-2.5-flash"
     gemini_image_model: str = "gemini-3.1-flash-lite-image"
     gemini_api_key: str = ""
@@ -185,7 +185,7 @@ class Settings:
             image_vlm_check=_bool("IMAGE_VLM_CHECK", True, env),
             image_required=_bool("IMAGE_REQUIRED", True, env),
             day_timezone=_str("DAY_TIMEZONE", "Africa/Casablanca", env),
-            gemini_model=_str("GEMINI_MODEL", "gemini-3.8-flash", env),
+            gemini_model=_str("GEMINI_MODEL", "gemini-3.5-flash-lite", env),
             gemini_fallback_model=_str("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash", env),
             gemini_image_model=_str("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-lite-image", env),
             gemini_api_key=_str("GEMINI_API_KEY", "", env),
