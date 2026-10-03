@@ -2,10 +2,8 @@
 """Wrapper around the Google GenAI SDK (`google-genai`): JSON + image generation."""
 from __future__ import annotations
 
-import base64
-import threading
 import time
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
@@ -39,27 +37,8 @@ class ImageGenError(GeminiError):
     """Image generation failed."""
 
 
-def _with_timeout(fn: Callable[[], Any], seconds: float, label: str) -> Any:
-    """Run fn() in a daemon thread; raise TimeoutError if it does not finish in time."""
-    box: dict[str, Any] = {}
-
-    def runner() -> None:
-        try:
-            box["value"] = fn()
-        except BaseException as exc:  # noqa: BLE001
-            box["error"] = exc
-
-    worker = threading.Thread(target=runner, daemon=True)
-    worker.start()
-    worker.join(seconds)
-
-    if worker.is_alive():
-        raise TimeoutError(f"{label} timed out after {int(seconds)}s")
-
-    if "error" in box:
-        raise box["error"]
-
-    return box.get("value")
+class ImageQuotaError(ImageGenError):
+    """The image provider has no quota left (retrying is pointless)."""
 
 
 class GeminiClient:
@@ -91,7 +70,16 @@ class GeminiClient:
         return self._client is not None
 
     @staticmethod
-    def _retryable(exc: BaseException) -> bool:
+    def _is_quota_exhausted(exc: BaseException) -> bool:
+        """Zero quota (limit: 0) or an exhausted daily quota: retrying cannot help."""
+        low = str(exc).lower()
+        return "limit: 0" in low or "perday" in low
+
+    @classmethod
+    def _retryable(cls, exc: BaseException) -> bool:
+        if cls._is_quota_exhausted(exc):
+            return False
+
         for attr in ("code", "status_code"):
             raw = getattr(exc, attr, None)
             try:
@@ -254,7 +242,7 @@ class GeminiClient:
         raise last or GeminiError("Gemini JSON generation failed across all models")
 
     # ------------------------------------------------------------------
-    # Image generation
+    # Image generation (IMAGE_PROVIDER=gemini only)
     def _get_image_client(self) -> Any:
         if self._image_client is None:
             key = self.cfg.image_api_key or self.cfg.gemini_api_key
@@ -264,63 +252,6 @@ class GeminiClient:
                 logger.warn("GEMINI_IMAGE", f"image client init failed ({type(exc).__name__}); using primary client")
                 self._image_client = self._client
         return self._image_client
-
-    @staticmethod
-    def _interactions_image(
-        client: Any,
-        model: str,
-        prompt: str,
-        references: list[tuple[bytes, str]] | None,
-        aspect_ratio: str,
-    ) -> tuple[bytes, str]:
-        """Image generation through the Interactions API (as given by AI Studio 'Get code')."""
-        interactions = getattr(client, "interactions", None)
-
-        if interactions is None or not hasattr(interactions, "create"):
-            raise AttributeError("client.interactions is not available in this google-genai version")
-
-        text = f"{prompt}\n\nAspect ratio: {aspect_ratio}."
-
-        if references:
-            input_value: Any = [
-                {"type": "image", "data": base64.b64encode(data).decode("ascii"), "mime_type": mime}
-                for data, mime in references
-            ]
-            input_value.append({"type": "text", "text": text})
-        else:
-            input_value = text
-
-        interaction = interactions.create(
-            model=model if model.startswith("models/") else f"models/{model}",
-            input=input_value,
-            generation_config={
-                "temperature": 1,
-                "max_output_tokens": 65536,
-                "top_p": 0.95,
-                "thinking_level": "minimal",
-            },
-            response_modalities=["image", "text"],
-        )
-
-        for step in getattr(interaction, "steps", None) or []:
-            if getattr(step, "type", "") != "model_output" or not getattr(step, "content", None):
-                continue
-
-            for part in step.content:
-                if getattr(part, "type", "") != "image":
-                    continue
-
-                raw = getattr(part, "data", None)
-
-                if not raw:
-                    continue
-
-                data = base64.b64decode(raw) if isinstance(raw, str) else bytes(raw)
-                mime = getattr(part, "mime_type", None) or "image/png"
-
-                return data, str(mime)
-
-        raise ImageGenError(f"No image bytes returned by {model} (interactions)")
 
     @staticmethod
     def _gemini_image(
@@ -371,30 +302,6 @@ class GeminiClient:
 
         raise ImageGenError(f"No image bytes returned by {model}")
 
-    @staticmethod
-    def _imagen_image(client: Any, model: str, prompt: str, aspect_ratio: str) -> tuple[bytes, str]:
-        from google.genai import types
-
-        try:
-            config = types.GenerateImagesConfig(
-                number_of_images=1,
-                aspect_ratio=aspect_ratio,
-                output_mime_type="image/jpeg",
-            )
-        except Exception:
-            config = types.GenerateImagesConfig(number_of_images=1, output_mime_type="image/jpeg")
-
-        response = client.models.generate_images(model=model, prompt=prompt, config=config)
-
-        images = getattr(response, "generated_images", None) or []
-
-        if images:
-            data = getattr(getattr(images[0], "image", None), "image_bytes", None)
-            if data:
-                return bytes(data), "image/jpeg"
-
-        raise ImageGenError(f"No image bytes returned by {model}")
-
     def generate_image(
         self,
         prompt: str,
@@ -403,7 +310,7 @@ class GeminiClient:
         aspect_ratio: str = "1:1",
         tag: str = "GEMINI_IMAGE",
     ) -> tuple[bytes, str]:
-        """Return (image_bytes, mime_type). Raises ImageGenError on failure."""
+        """Return (image_bytes, mime_type). Raises ImageQuotaError / ImageGenError."""
         if not self._client:
             raise ImageGenError("Gemini client is not configured")
 
@@ -412,59 +319,27 @@ class GeminiClient:
         if not model:
             raise ImageGenError("GEMINI_IMAGE_MODEL is empty")
 
-        client = self._get_image_client()
-        backend = "imagen" if "imagen" in model.lower() else "gemini"
+        if "imagen" in model.lower():
+            raise ImageGenError("Imagen models are not supported by the Gemini Developer API; use a gemini-*-image model")
 
-        if backend == "imagen" and references:
-            logger.warn(tag, "Imagen models ignore reference images")
+        client = self._get_image_client()
 
         delays = self._delays()
         attempts = len(delays) + 1
         last: Exception | None = None
 
-        hard_timeout = float(self.cfg.image_request_timeout) + 10.0
-        use_interactions = backend == "gemini"
-
         for attempt in range(1, attempts + 1):
             try:
-                if backend == "gemini":
-                    if use_interactions:
-                        try:
-                            logger.log(tag, f"Calling Interactions API on {model} (attempt {attempt}/{attempts})")
-                            return _with_timeout(
-                                lambda: self._interactions_image(
-                                    client, model, prompt, references, aspect_ratio
-                                ),
-                                hard_timeout,
-                                "Interactions API",
-                            )
-                        except Exception as inter_exc:
-                            if self._retryable(inter_exc):
-                                raise  # quota / overload / timeout: handled by the retry logic below
-
-                            logger.warn(
-                                tag,
-                                f"Interactions API unavailable ({type(inter_exc).__name__}); "
-                                "falling back to generate_content",
-                            )
-                            use_interactions = False
-
-                    logger.log(tag, f"Calling generate_content on {model} (attempt {attempt}/{attempts})")
-                    return _with_timeout(
-                        lambda: self._gemini_image(client, model, prompt, references, aspect_ratio),
-                        hard_timeout,
-                        "generate_content",
-                    )
-
-                logger.log(tag, f"Calling generate_images on {model} (attempt {attempt}/{attempts})")
-                return _with_timeout(
-                    lambda: self._imagen_image(client, model, prompt, aspect_ratio),
-                    hard_timeout,
-                    "generate_images",
-                )
+                logger.log(tag, f"Calling generate_content on {model} (attempt {attempt}/{attempts})")
+                return self._gemini_image(client, model, prompt, references, aspect_ratio)
 
             except Exception as exc:
                 last = exc
+
+                if self._is_quota_exhausted(exc):
+                    raise ImageQuotaError(
+                        f"No usable quota for {model} (limit 0 or daily quota exhausted); billing may be required"
+                    ) from exc
 
                 if attempt < attempts and self._retryable(exc):
                     delay = delays[attempt - 1]
