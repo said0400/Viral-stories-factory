@@ -2,6 +2,7 @@
 """Wrapper around the Google GenAI SDK (`google-genai`): JSON + image generation."""
 from __future__ import annotations
 
+import base64
 import time
 from typing import Any, TypeVar
 
@@ -241,6 +242,63 @@ class GeminiClient:
         return self._image_client
 
     @staticmethod
+    def _interactions_image(
+        client: Any,
+        model: str,
+        prompt: str,
+        references: list[tuple[bytes, str]] | None,
+        aspect_ratio: str,
+    ) -> tuple[bytes, str]:
+        """Image generation through the Interactions API (as given by AI Studio 'Get code')."""
+        interactions = getattr(client, "interactions", None)
+
+        if interactions is None or not hasattr(interactions, "create"):
+            raise AttributeError("client.interactions is not available in this google-genai version")
+
+        text = f"{prompt}\n\nAspect ratio: {aspect_ratio}."
+
+        if references:
+            input_value: Any = [
+                {"type": "image", "data": base64.b64encode(data).decode("ascii"), "mime_type": mime}
+                for data, mime in references
+            ]
+            input_value.append({"type": "text", "text": text})
+        else:
+            input_value = text
+
+        interaction = interactions.create(
+            model=model if model.startswith("models/") else f"models/{model}",
+            input=input_value,
+            generation_config={
+                "temperature": 1,
+                "max_output_tokens": 65536,
+                "top_p": 0.95,
+                "thinking_level": "minimal",
+            },
+            response_modalities=["image", "text"],
+        )
+
+        for step in getattr(interaction, "steps", None) or []:
+            if getattr(step, "type", "") != "model_output" or not getattr(step, "content", None):
+                continue
+
+            for part in step.content:
+                if getattr(part, "type", "") != "image":
+                    continue
+
+                raw = getattr(part, "data", None)
+
+                if not raw:
+                    continue
+
+                data = base64.b64decode(raw) if isinstance(raw, str) else bytes(raw)
+                mime = getattr(part, "mime_type", None) or "image/png"
+
+                return data, str(mime)
+
+        raise ImageGenError(f"No image bytes returned by {model} (interactions)")
+
+    @staticmethod
     def _gemini_image(
         client: Any,
         model: str,
@@ -340,10 +398,27 @@ class GeminiClient:
         attempts = len(delays) + 1
         last: Exception | None = None
 
+        use_interactions = backend == "gemini"
+
         for attempt in range(1, attempts + 1):
             try:
                 if backend == "gemini":
+                    if use_interactions:
+                        try:
+                            return self._interactions_image(client, model, prompt, references, aspect_ratio)
+                        except Exception as inter_exc:
+                            if self._retryable(inter_exc):
+                                raise  # quota / overload: let the retry logic below handle it
+
+                            logger.warn(
+                                tag,
+                                f"Interactions API unavailable ({type(inter_exc).__name__}); "
+                                "falling back to generate_content",
+                            )
+                            use_interactions = False
+
                     return self._gemini_image(client, model, prompt, references, aspect_ratio)
+
                 return self._imagen_image(client, model, prompt, aspect_ratio)
 
             except Exception as exc:
