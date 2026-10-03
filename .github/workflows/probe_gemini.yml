@@ -1,0 +1,63 @@
+name: Probe Gemini
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_models:
+        description: "Image models to test (comma separated)"
+        required: false
+        default: "gemini-3.1-flash-lite-image,gemini-3.1-flash-image,imagen-3.0-generate-002"
+      text_models:
+        description: "Text models to test (comma separated)"
+        required: false
+        default: "gemini-3.5-flash-lite,gemini-2.5-flash"
+      methods:
+        description: "Call styles for Gemini image models"
+        required: false
+        default: "generate_content,interactions"
+
+concurrency:
+  group: probe-gemini
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      IMAGE_API_KEY: ${{ secrets.IMAGE_API_KEY }}
+      PROBE_IMAGE_MODELS: ${{ inputs.image_models }}
+      PROBE_TEXT_MODELS: ${{ inputs.text_models }}
+      PROBE_METHODS: ${{ inputs.methods }}
+      PROBE_TIMEOUT: "90"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run probe
+        run: python scripts/probe_gemini.py
+
+      - name: Upload probe output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-output-${{ github.run_id }}
+          path: probe_out/
+          if-no-files-found: ignore
+          retention-days: 7
