@@ -9,6 +9,7 @@ from typing import Mapping
 from zoneinfo import ZoneInfo
 
 DEFAULT_EXPORTS_DIR = "data/exports"
+DEFAULT_CF_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b"
 
 
 def _raw(key: str, env: Mapping[str, str] | None) -> str | None:
@@ -94,6 +95,13 @@ class Settings:
     image_api_key: str = ""
     llm_timeout: int = 180
 
+    # --- image provider
+    image_provider: str = "cloudflare"      # cloudflare | gemini
+    cloudflare_account_id: str = ""
+    cloudflare_api_token: str = ""
+    cloudflare_image_model: str = DEFAULT_CF_IMAGE_MODEL
+    cloudflare_timeout: int = 300
+
     # --- network
     request_timeout: int = 60
     image_request_timeout: int = 180
@@ -144,11 +152,15 @@ class Settings:
         put("llm_timeout", int(_clamp(int(self.llm_timeout), 30, 600)))
         put("request_timeout", int(_clamp(int(self.request_timeout), 5, 300)))
         put("image_request_timeout", int(_clamp(int(self.image_request_timeout), 10, 900)))
+        put("cloudflare_timeout", int(_clamp(int(self.cloudflare_timeout), 30, 900)))
         put("max_retries", int(_clamp(int(self.max_retries), 0, 10)))
         put("per_host_delay_seconds", float(_clamp(float(self.per_host_delay_seconds), 0.0, 60.0)))
 
         style = str(self.people_image_style or "").strip().lower()
         put("people_image_style", style if style in {"reference", "illustration", "faceless"} else "illustration")
+
+        provider = str(self.image_provider or "").strip().lower()
+        put("image_provider", provider if provider in {"cloudflare", "gemini"} else "cloudflare")
 
         defaults = {
             "data_dir": "data",
@@ -158,10 +170,13 @@ class Settings:
             "exports_dir": DEFAULT_EXPORTS_DIR,
             "user_agent": "ViralStoriesFactoryBot/1.0",
             "day_timezone": "Africa/Casablanca",
+            "cloudflare_image_model": DEFAULT_CF_IMAGE_MODEL,
         }
         for name, default in defaults.items():
             put(name, str(getattr(self, name) or "").strip() or default)
 
+        put("cloudflare_account_id", str(self.cloudflare_account_id or "").strip())
+        put("cloudflare_api_token", str(self.cloudflare_api_token or "").strip())
         put("public_images_base", str(self.public_images_base or "").strip().rstrip("/"))
 
     # ------------------------------------------------------------------
@@ -191,6 +206,11 @@ class Settings:
             gemini_api_key=_str("GEMINI_API_KEY", "", env),
             image_api_key=_str("IMAGE_API_KEY", "", env),
             llm_timeout=_int("LLM_TIMEOUT", 180, env),
+            image_provider=_str("IMAGE_PROVIDER", "cloudflare", env),
+            cloudflare_account_id=_str("CLOUDFLARE_ACCOUNT_ID", "", env),
+            cloudflare_api_token=_str("CLOUDFLARE_API_TOKEN", "", env),
+            cloudflare_image_model=_str("CLOUDFLARE_IMAGE_MODEL", DEFAULT_CF_IMAGE_MODEL, env),
+            cloudflare_timeout=_int("CLOUDFLARE_TIMEOUT", 300, env),
             request_timeout=_int("REQUEST_TIMEOUT", 60, env),
             image_request_timeout=_int("IMAGE_REQUEST_TIMEOUT", 180, env),
             max_retries=_int("MAX_RETRIES", 3, env),
@@ -228,6 +248,10 @@ class Settings:
             return Path(self.dry_run_dir) / "exports"
         return Path(self.exports_dir)
 
+    @property
+    def needs_images(self) -> bool:
+        return (not self.dry_run) or self.dry_run_generate_images
+
     # ------------------------------------------------------------------
     # Readiness
     def is_blogger_ready(self) -> bool:
@@ -237,6 +261,9 @@ class Settings:
             and self.google_client_secret
             and self.google_refresh_token
         )
+
+    def cloudflare_ready(self) -> bool:
+        return bool(self.cloudflare_account_id and self.cloudflare_api_token)
 
     def twilio_configured(self) -> bool:
         return bool(
@@ -258,6 +285,17 @@ class Settings:
         except Exception:
             problems.append(f"DAY_TIMEZONE is invalid: {self.day_timezone}")
 
+        if (
+            self.needs_images
+            and self.image_provider == "cloudflare"
+            and self.image_required
+            and not self.cloudflare_ready()
+        ):
+            problems.append(
+                "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required "
+                "when IMAGE_PROVIDER=cloudflare and images are generated"
+            )
+
         if need_publish:
             for name, value in (
                 ("BLOGGER_BLOG_ID", self.blogger_blog_id),
@@ -273,8 +311,18 @@ class Settings:
     def warnings(self, need_publish: bool = False) -> list[str]:
         out: list[str] = []
 
-        if self.image_required and not (self.image_api_key or self.gemini_api_key):
-            out.append("No IMAGE_API_KEY or GEMINI_API_KEY; image generation will fail.")
+        if self.needs_images:
+            if self.image_provider == "cloudflare" and not self.cloudflare_ready() and not self.image_required:
+                out.append("Cloudflare credentials are missing; images will be skipped (IMAGE_REQUIRED=false).")
+
+            if self.image_provider == "gemini":
+                if not (self.image_api_key or self.gemini_api_key):
+                    out.append("No IMAGE_API_KEY or GEMINI_API_KEY; image generation will fail.")
+                else:
+                    out.append(
+                        "IMAGE_PROVIDER=gemini: Gemini image models may require billing "
+                        "(free tier quota can be 0)."
+                    )
 
         if need_publish:
             if not self.twilio_configured():
@@ -298,6 +346,8 @@ class Settings:
         values = [
             self.gemini_api_key,
             self.image_api_key,
+            self.cloudflare_account_id,
+            self.cloudflare_api_token,
             self.google_client_id,
             self.google_client_secret,
             self.google_refresh_token,
