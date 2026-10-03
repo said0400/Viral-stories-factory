@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import base64
+import threading
 import time
-from typing import Any, TypeVar
+from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel
 
@@ -36,6 +37,29 @@ class GeminiError(Exception):
 
 class ImageGenError(GeminiError):
     """Image generation failed."""
+
+
+def _with_timeout(fn: Callable[[], Any], seconds: float, label: str) -> Any:
+    """Run fn() in a daemon thread; raise TimeoutError if it does not finish in time."""
+    box: dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001
+            box["error"] = exc
+
+    worker = threading.Thread(target=runner, daemon=True)
+    worker.start()
+    worker.join(seconds)
+
+    if worker.is_alive():
+        raise TimeoutError(f"{label} timed out after {int(seconds)}s")
+
+    if "error" in box:
+        raise box["error"]
+
+    return box.get("value")
 
 
 class GeminiClient:
@@ -398,6 +422,7 @@ class GeminiClient:
         attempts = len(delays) + 1
         last: Exception | None = None
 
+        hard_timeout = float(self.cfg.image_request_timeout) + 10.0
         use_interactions = backend == "gemini"
 
         for attempt in range(1, attempts + 1):
@@ -405,10 +430,17 @@ class GeminiClient:
                 if backend == "gemini":
                     if use_interactions:
                         try:
-                            return self._interactions_image(client, model, prompt, references, aspect_ratio)
+                            logger.log(tag, f"Calling Interactions API on {model} (attempt {attempt}/{attempts})")
+                            return _with_timeout(
+                                lambda: self._interactions_image(
+                                    client, model, prompt, references, aspect_ratio
+                                ),
+                                hard_timeout,
+                                "Interactions API",
+                            )
                         except Exception as inter_exc:
                             if self._retryable(inter_exc):
-                                raise  # quota / overload: let the retry logic below handle it
+                                raise  # quota / overload / timeout: handled by the retry logic below
 
                             logger.warn(
                                 tag,
@@ -417,9 +449,19 @@ class GeminiClient:
                             )
                             use_interactions = False
 
-                    return self._gemini_image(client, model, prompt, references, aspect_ratio)
+                    logger.log(tag, f"Calling generate_content on {model} (attempt {attempt}/{attempts})")
+                    return _with_timeout(
+                        lambda: self._gemini_image(client, model, prompt, references, aspect_ratio),
+                        hard_timeout,
+                        "generate_content",
+                    )
 
-                return self._imagen_image(client, model, prompt, aspect_ratio)
+                logger.log(tag, f"Calling generate_images on {model} (attempt {attempt}/{attempts})")
+                return _with_timeout(
+                    lambda: self._imagen_image(client, model, prompt, aspect_ratio),
+                    hard_timeout,
+                    "generate_images",
+                )
 
             except Exception as exc:
                 last = exc
