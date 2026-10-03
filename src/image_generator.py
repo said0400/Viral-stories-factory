@@ -9,8 +9,9 @@ from pathlib import Path
 from PIL import Image, ImageStat
 
 from . import logger
+from .cloudflare_client import CloudflareClient
 from .config import Settings
-from .gemini_client import GeminiClient, GeminiError, ImageGenError
+from .gemini_client import GeminiClient, GeminiError, ImageGenError, ImageQuotaError
 from .models import ImageCheckSchema, ImageResult, SourceArticle, VisualAnalysis
 from .utils import sha256_hex
 from .visual_analyzer import ahash, hamming
@@ -44,6 +45,21 @@ class GeminiImageProvider(ImageProvider):
 
     def generate(self, prompt, references, aspect_ratio):
         return self.gem.generate_image(prompt, references=references, aspect_ratio=aspect_ratio)
+
+
+class CloudflareImageProvider(ImageProvider):
+    def __init__(self, client: CloudflareClient) -> None:
+        self.client = client
+
+    def generate(self, prompt, references, aspect_ratio):
+        return self.client.generate_image(prompt, references=references, aspect_ratio=aspect_ratio)
+
+
+def build_provider(cfg: Settings, gem: GeminiClient) -> ImageProvider:
+    if cfg.image_provider == "gemini":
+        return GeminiImageProvider(gem)
+
+    return CloudflareImageProvider(CloudflareClient(cfg))
 
 
 # ------------------------------------------------------------------ strategy
@@ -245,7 +261,7 @@ def _save_jpeg(img: Image.Image, path: Path) -> tuple[str, str]:
 
 
 def vlm_check(gem: GeminiClient, jpeg: bytes, title: str, summary: str) -> tuple[bool, str]:
-    """Optional second quality gate. Fail-open if the checker is unavailable."""
+    """Optional second quality gate (text/vision model). Fail-open if unavailable."""
     try:
         r = gem.generate_json(
             (
@@ -279,7 +295,14 @@ class ImageGenerator:
     def __init__(self, cfg: Settings, gem: GeminiClient, provider: ImageProvider | None = None) -> None:
         self.cfg = cfg
         self.gem = gem
-        self.provider = provider or GeminiImageProvider(gem)
+        self._provider = provider
+
+    @property
+    def provider(self) -> ImageProvider:
+        # Built lazily so a dry run without images never needs image credentials.
+        if self._provider is None:
+            self._provider = build_provider(self.cfg, self.gem)
+        return self._provider
 
     def _one(
         self,
@@ -303,7 +326,7 @@ class ImageGenerator:
         With reference: full+ref, simple+ref, simple without ref (editorial fallback).
         Without reference: full, simple.
         If reference_identity loses its reference it falls back to editorial and
-        never claims identity preservation.
+        never claims identity preservation. A quota error stops immediately.
         """
         if ref:
             plans: list[tuple[bool, tuple[bytes, str] | None]] = [(False, ref), (True, ref), (True, None)]
@@ -326,6 +349,9 @@ class ImageGenerator:
                     f"{kind}: generating ({strat}/{sty}, attempt {i}/{max_attempts}, ref={'yes' if r else 'no'})",
                 )
                 data, _mime = self.provider.generate(prompt, [r] if r else None, aspect)
+
+            except ImageQuotaError:
+                raise
 
             except (ImageGenError, GeminiError) as exc:
                 logger.warn("IMAGE", f"{kind}: attempt {i} failed ({exc})")
@@ -426,7 +452,8 @@ class ImageGenerator:
             source_image_ahash=source_ahash,
             notes=(
                 "Identity preservation depends on provider/model capabilities; "
-                f"used={used}; reference_used={'yes' if use_ref else 'no'}"
+                f"provider={self.cfg.image_provider}; used={used}; "
+                f"reference_used={'yes' if use_ref else 'no'}"
             ),
         )
 
