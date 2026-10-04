@@ -86,9 +86,11 @@ class Settings:
 
     # --- editorial / image
     people_image_style: str = "reference"   # reference | illustration | faceless
-    image_mode: str = "faithful"            # faithful | creative
+    image_mode: str = "faithful"            # faithful | creative  (article image)
     cinematic_style: str = DEFAULT_CINEMATIC_STYLE
-    facebook_separate_image: bool = True
+    facebook_image_mode: str = "photo"      # photo | generated
+    facebook_layout: str = "auto"           # auto | single | split | inset
+    facebook_separate_image: bool = True    # only used when facebook_image_mode=generated
     image_vlm_check: bool = True
     image_required: bool = True
 
@@ -172,6 +174,12 @@ class Settings:
         mode = str(self.image_mode or "").strip().lower()
         put("image_mode", mode if mode in {"faithful", "creative"} else "faithful")
 
+        fb_mode = str(self.facebook_image_mode or "").strip().lower()
+        put("facebook_image_mode", fb_mode if fb_mode in {"photo", "generated"} else "photo")
+
+        layout = str(self.facebook_layout or "").strip().lower()
+        put("facebook_layout", layout if layout in {"auto", "single", "split", "inset"} else "auto")
+
         provider = str(self.image_provider or "").strip().lower()
         put("image_provider", provider if provider in {"cloudflare", "gemini"} else "cloudflare")
 
@@ -214,6 +222,8 @@ class Settings:
             people_image_style=_str("PEOPLE_IMAGE_STYLE", "reference", env),
             image_mode=_str("IMAGE_MODE", "faithful", env),
             cinematic_style=_str("CINEMATIC_STYLE", DEFAULT_CINEMATIC_STYLE, env),
+            facebook_image_mode=_str("FACEBOOK_IMAGE_MODE", "photo", env),
+            facebook_layout=_str("FACEBOOK_LAYOUT", "auto", env),
             facebook_separate_image=_bool("FACEBOOK_SEPARATE_IMAGE", True, env),
             image_vlm_check=_bool("IMAGE_VLM_CHECK", True, env),
             image_required=_bool("IMAGE_REQUIRED", True, env),
@@ -356,6 +366,12 @@ class Settings:
                         "IMAGE_PROVIDER=gemini: Gemini image models may require billing "
                         "(free tier quota can be 0)."
                     )
+
+            if self.facebook_image_mode == "photo":
+                out.append(
+                    "FACEBOOK_IMAGE_MODE=photo: Facebook images are built from the source site's own "
+                    "photos (check usage rights; stories with minors use a generated image)."
+                )
 
         if need_publish:
             if not self.twilio_configured():
