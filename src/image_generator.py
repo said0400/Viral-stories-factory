@@ -332,7 +332,7 @@ def _save_jpeg(img: Image.Image, path: Path) -> tuple[str, str]:
 
 
 def vlm_check(gem: GeminiClient, jpeg: bytes, title: str, summary: str) -> tuple[bool, str]:
-    """Optional second quality gate (text/vision model). Fail-open if unavailable."""
+    """Creative-path quality gate: relevance to the story. Fail-open if unavailable."""
     try:
         r = gem.generate_json(
             (
@@ -361,6 +361,43 @@ def vlm_check(gem: GeminiClient, jpeg: bytes, title: str, summary: str) -> tuple
         return True, "check unavailable (skipped)"
 
 
+def fidelity_check(
+    gem: GeminiClient,
+    source: tuple[bytes, str],
+    result_jpeg: bytes,
+) -> tuple[bool, str]:
+    """Faithful-path quality gate: is the result a faithful restyle of the SOURCE photo? Fail-open."""
+    try:
+        r = gem.generate_json(
+            (
+                "Image 1 is the SOURCE photograph. Image 2 is a cinematic restyled version of it.\n"
+                "Judge ONLY whether Image 2 is a faithful restyle of Image 1.\n"
+                "relevant_to_story = true when Image 2 shows the same scene as Image 1: the same kind of "
+                "subjects, the same number of people, the same setting and a similar composition. "
+                "A different colour grade, lighting or mood is expected and fine.\n"
+                "contains_text_or_watermark = true only if Image 2 shows visible text, captions, a watermark "
+                "or a logo that is not in Image 1.\n"
+                "obvious_defects = true only for clearly deformed faces, hands or anatomy, "
+                "or severe rendering artifacts.\n"
+                "Keep reason to one short sentence."
+            ),
+            ImageCheckSchema,
+            images=[(source[0], source[1] or "image/jpeg"), (result_jpeg, "image/jpeg")],
+            temperature=0.0,
+            tag="IMGCHECK",
+        )
+
+        ok = r.relevant_to_story and not r.contains_text_or_watermark and not r.obvious_defects
+
+        return ok, r.reason
+
+    except GeminiError:
+        return True, "check unavailable (skipped)"
+    except Exception as exc:
+        logger.warn("IMGCHECK", f"fidelity check error ({type(exc).__name__}); skipping")
+        return True, "check unavailable (skipped)"
+
+
 # ------------------------------------------------------------------ main entry
 class ImageGenerator:
     def __init__(self, cfg: Settings, gem: GeminiClient, provider: ImageProvider | None = None) -> None:
@@ -374,6 +411,18 @@ class ImageGenerator:
         if self._provider is None:
             self._provider = build_provider(self.cfg, self.gem)
         return self._provider
+
+    def _keep_rejected(self, data: bytes, name: str) -> None:
+        """Dry runs only: keep rejected images (and the source) inside the exported artifact for inspection."""
+        if not self.cfg.dry_run or not data:
+            return
+
+        try:
+            folder = self.cfg.export_path / "rejected"
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_bytes(data)
+        except Exception:
+            pass
 
     def _one(
         self,
@@ -443,14 +492,27 @@ class ImageGenerator:
                 continue
 
             if self.cfg.image_vlm_check:
+                payload = b""
+
                 try:
-                    good, reason = vlm_check(self.gem, out_path.read_bytes(), title, summary)
+                    payload = out_path.read_bytes()
+
+                    if strat == FAITHFUL and r is not None:
+                        good, reason = fidelity_check(self.gem, r, payload)
+                    else:
+                        good, reason = vlm_check(self.gem, payload, title, summary)
+
                 except Exception as exc:
-                    logger.warn("IMAGE", f"{kind}: VLM check failed ({type(exc).__name__}); continuing")
+                    logger.warn("IMAGE", f"{kind}: quality check failed ({type(exc).__name__}); continuing")
                     good, reason = True, "check unavailable (skipped)"
 
                 if not good:
-                    logger.warn("IMAGE", f"{kind}: relevance check failed ({reason})")
+                    logger.warn("IMAGE", f"{kind}: quality check failed ({reason})")
+
+                    if strat == FAITHFUL and r is not None:
+                        self._keep_rejected(r[0], f"{out_path.stem}_source.jpg")
+
+                    self._keep_rejected(payload, f"{out_path.stem}_rejected{i}.jpg")
 
                     try:
                         out_path.unlink(missing_ok=True)
