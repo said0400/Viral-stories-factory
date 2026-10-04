@@ -3,6 +3,9 @@
 IMAGE_MODE=faithful (default): re-render the SOURCE photo as a cinematic version of the same scene.
 IMAGE_MODE=creative: reference-aware illustrations (old behaviour).
 Stories with minors, or without a usable source image, always use the creative path.
+
+FACEBOOK_IMAGE_MODE=photo (default): the Facebook image is composed from the article's own photos
+(no AI, no text). Stories involving minors fall back to a generated image.
 """
 from __future__ import annotations
 
@@ -17,11 +20,12 @@ from .cloudflare_client import CloudflareClient
 from .config import Settings
 from .gemini_client import GeminiClient, GeminiError, ImageGenError, ImageQuotaError
 from .models import ImageCheckSchema, ImageResult, SourceArticle, VisualAnalysis
-from .utils import sha256_hex
+from .photo_composer import compose, fetch_photos
+from .utils import PoliteFetcher, sha256_hex
 from .visual_analyzer import ahash, hamming
 
 ARTICLE_ASPECT = "16:9"
-FACEBOOK_ASPECT = "1:1"    # square image for the Facebook post
+FACEBOOK_ASPECT = "1:1"    # used only by the generated (non-photo) Facebook image
 
 FAITHFUL = "faithful_restyle"
 
@@ -366,7 +370,11 @@ def fidelity_check(
     source: tuple[bytes, str],
     result_jpeg: bytes,
 ) -> tuple[bool, str]:
-    """Faithful-path quality gate: is the result a faithful restyle of the SOURCE photo? Fail-open."""
+    """Faithful-path quality gate: is the result a faithful restyle of the SOURCE photo? Fail-open.
+
+    Only `relevant_to_story` and `obvious_defects` decide. The text field is ignored here: the source
+    itself may contain text, and a faithful restyle then legitimately contains it too.
+    """
     try:
         r = gem.generate_json(
             (
@@ -375,8 +383,7 @@ def fidelity_check(
                 "relevant_to_story = true when Image 2 shows the same scene as Image 1: the same kind of "
                 "subjects, the same number of people, the same setting and a similar composition. "
                 "A different colour grade, lighting or mood is expected and fine.\n"
-                "contains_text_or_watermark = true only if Image 2 shows visible text, captions, a watermark "
-                "or a logo that is not in Image 1.\n"
+                "contains_text_or_watermark: not used, answer false.\n"
                 "obvious_defects = true only for clearly deformed faces, hands or anatomy, "
                 "or severe rendering artifacts.\n"
                 "Keep reason to one short sentence."
@@ -387,7 +394,7 @@ def fidelity_check(
             tag="IMGCHECK",
         )
 
-        ok = r.relevant_to_story and not r.contains_text_or_watermark and not r.obvious_defects
+        ok = r.relevant_to_story and not r.obvious_defects
 
         return ok, r.reason
 
@@ -400,10 +407,17 @@ def fidelity_check(
 
 # ------------------------------------------------------------------ main entry
 class ImageGenerator:
-    def __init__(self, cfg: Settings, gem: GeminiClient, provider: ImageProvider | None = None) -> None:
+    def __init__(
+        self,
+        cfg: Settings,
+        gem: GeminiClient,
+        provider: ImageProvider | None = None,
+        fetcher: PoliteFetcher | None = None,
+    ) -> None:
         self.cfg = cfg
         self.gem = gem
         self._provider = provider
+        self.fetcher = fetcher
 
     @property
     def provider(self) -> ImageProvider:
@@ -423,6 +437,37 @@ class ImageGenerator:
             (folder / name).write_bytes(data)
         except Exception:
             pass
+
+    def _facebook_photo(self, article: SourceArticle, v: VisualAnalysis, out_path: Path) -> tuple[str, str] | None:
+        """Facebook image from the article's own photos. Returns (sha, ahash) or None to use the generated path."""
+        if self.cfg.facebook_image_mode != "photo":
+            return None
+
+        if v.involves_minors:
+            logger.warn("IMAGE", "facebook photo mode skipped (minors involved); using generated image")
+            return None
+
+        if self.fetcher is None:
+            logger.warn("IMAGE", "facebook photo mode unavailable (no fetcher); using generated image")
+            return None
+
+        try:
+            photos = fetch_photos(article, self.fetcher, limit=2)
+
+            if not photos:
+                logger.warn("IMAGE", "facebook photo mode: no usable source photo; using generated image")
+                return None
+
+            canvas = compose(photos, self.cfg.facebook_layout)
+            sha, ah = _save_jpeg(canvas, out_path)
+
+            logger.log("IMAGE", f"facebook: photo layout built from {len(photos)} source photo(s)")
+
+            return sha, ah
+
+        except Exception as exc:
+            logger.warn("IMAGE", f"facebook photo layout failed ({type(exc).__name__}); using generated image")
+            return None
 
     def _one(
         self,
@@ -543,7 +588,7 @@ class ImageGenerator:
         known: list[tuple[str, str]],
     ) -> ImageResult:
         """
-        Generate the article image (16:9) and, optionally, a separate square Facebook image.
+        Generate the article image (16:9) and the Facebook image.
 
         Unique filenames per story: {story_id}_generated.jpg / {story_id}_facebook.jpg
         """
@@ -606,13 +651,20 @@ class ImageGenerator:
             notes=(
                 "Output fidelity depends on provider/model capabilities; "
                 f"mode={self.cfg.image_mode}; provider={self.cfg.image_provider}; used={used}; "
-                f"reference_used={'yes' if reference_used else 'no'}"
+                f"reference_used={'yes' if reference_used else 'no'}; "
+                f"facebook_mode={self.cfg.facebook_image_mode}"
             ),
         )
 
-        if self.cfg.facebook_separate_image:
-            fb_out = self.cfg.images_dir / f"{story_id}_facebook.jpg"
+        # ---------------------------------------------------------------- Facebook image
+        fb_out = self.cfg.images_dir / f"{story_id}_facebook.jpg"
+        photo = self._facebook_photo(article, v, fb_out)
 
+        if photo is not None:
+            res.facebook_path = str(fb_out)
+            res.facebook_image_hash, res.facebook_image_ahash = photo
+
+        elif self.cfg.facebook_separate_image:
             try:
                 fb_sha, fb_ah, _ = self._one(
                     kind="facebook",
@@ -647,6 +699,7 @@ class ImageGenerator:
                 res.facebook_path = res.path
                 res.facebook_image_hash = sha
                 res.facebook_image_ahash = ah
+
         else:
             res.facebook_path = res.path
             res.facebook_image_hash = sha
