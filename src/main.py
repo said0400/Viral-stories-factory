@@ -54,7 +54,7 @@ class Factory:
         self.hist = H.History(cfg.history_file, cfg.cache_dir, cfg.day_timezone)
         self.gem = GeminiClient(cfg)
         self.fetcher = PoliteFetcher(cfg.user_agent, cfg.request_timeout, cfg.per_host_delay_seconds)
-        self.imgs = ImageGenerator(self.work, self.gem)
+        self.imgs = ImageGenerator(self.work, self.gem, fetcher=self.fetcher)
         self.blogger = None if self.dry else BloggerClient(cfg)
         self.whatsapp: WhatsAppClient | None = None
         self.completed = self.partial = self.failed = 0
