@@ -93,6 +93,9 @@ jobs:
       YOUR_PERSONAL_NUMBER: ${{ secrets.YOUR_PERSONAL_NUMBER }}
       WHATSAPP_CONTENT_SID: ${{ secrets.WHATSAPP_CONTENT_SID }}
 
+      GEMINI_CONTENT_MODEL: ${{ vars.GEMINI_CONTENT_MODEL || 'gemini-3.8-flash' }}
+      GEMINI_CONTENT_FALLBACKS: ${{ vars.GEMINI_CONTENT_FALLBACKS || 'gemini-3.6-flash,gemini-3.5-flash,gemini-2.5-flash' }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
