@@ -398,9 +398,8 @@ class Factory:
                         f"Subject type: {cache.visual.subject_type}; people={cache.visual.contains_real_people}",
                     )
 
-                elif cache.visual.reference_required:
+                elif cache.visual.reference_required or self.cfg.image_mode == "faithful":
                     ref = visual_analyzer.acquire_source_image(article, self.fetcher)
-
                 cache.image = self.imgs.generate(
                     story_id=st.story_id,
                     article=article,
