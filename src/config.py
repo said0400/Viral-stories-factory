@@ -12,6 +12,10 @@ DEFAULT_EXPORTS_DIR = "data/exports"
 DEFAULT_CF_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b"
 DEFAULT_CONTENT_MODEL = "gemini-3.8-flash"
 DEFAULT_CONTENT_FALLBACKS = "gemini-3.6-flash,gemini-3.5-flash,gemini-2.5-flash"
+DEFAULT_CINEMATIC_STYLE = (
+    "dramatic cinematic film still, moody high-contrast lighting, teal and orange color grading, "
+    "shallow depth of field, subtle film grain, rich atmospheric tones"
+)
 
 
 def _raw(key: str, env: Mapping[str, str] | None) -> str | None:
@@ -82,6 +86,8 @@ class Settings:
 
     # --- editorial / image
     people_image_style: str = "reference"   # reference | illustration | faceless
+    image_mode: str = "faithful"            # faithful | creative
+    cinematic_style: str = DEFAULT_CINEMATIC_STYLE
     facebook_separate_image: bool = True
     image_vlm_check: bool = True
     image_required: bool = True
@@ -90,9 +96,9 @@ class Settings:
     day_timezone: str = "Africa/Casablanca"
 
     # --- gemini
-    gemini_model: str = "gemini-3.5-flash-lite"            # triage / visual / image check
+    gemini_model: str = "gemini-3.5-flash-lite"              # triage / visual analysis / image check
     gemini_fallback_model: str = "gemini-2.5-flash"
-    gemini_content_model: str = DEFAULT_CONTENT_MODEL        # article / posts / titles / fact check
+    gemini_content_model: str = DEFAULT_CONTENT_MODEL         # article / posts / titles / fact check
     gemini_content_fallbacks: str = DEFAULT_CONTENT_FALLBACKS  # comma separated
     gemini_image_model: str = "gemini-3.1-flash-lite-image"
     gemini_api_key: str = ""
@@ -163,6 +169,9 @@ class Settings:
         style = str(self.people_image_style or "").strip().lower()
         put("people_image_style", style if style in {"reference", "illustration", "faceless"} else "illustration")
 
+        mode = str(self.image_mode or "").strip().lower()
+        put("image_mode", mode if mode in {"faithful", "creative"} else "faithful")
+
         provider = str(self.image_provider or "").strip().lower()
         put("image_provider", provider if provider in {"cloudflare", "gemini"} else "cloudflare")
 
@@ -176,6 +185,7 @@ class Settings:
             "day_timezone": "Africa/Casablanca",
             "cloudflare_image_model": DEFAULT_CF_IMAGE_MODEL,
             "gemini_content_model": DEFAULT_CONTENT_MODEL,
+            "cinematic_style": DEFAULT_CINEMATIC_STYLE,
         }
         for name, default in defaults.items():
             put(name, str(getattr(self, name) or "").strip() or default)
@@ -202,6 +212,8 @@ class Settings:
             max_story_attempts=_int("MAX_STORY_ATTEMPTS", 3, env),
             min_article_chars=_int("MIN_ARTICLE_CHARS", 600, env),
             people_image_style=_str("PEOPLE_IMAGE_STYLE", "reference", env),
+            image_mode=_str("IMAGE_MODE", "faithful", env),
+            cinematic_style=_str("CINEMATIC_STYLE", DEFAULT_CINEMATIC_STYLE, env),
             facebook_separate_image=_bool("FACEBOOK_SEPARATE_IMAGE", True, env),
             image_vlm_check=_bool("IMAGE_VLM_CHECK", True, env),
             image_required=_bool("IMAGE_REQUIRED", True, env),
