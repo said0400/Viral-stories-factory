@@ -1,5 +1,9 @@
-"""Replaceable image layer. Reference-aware for places/animals/objects; people get a
-non-photoreal illustration or a faceless scene (never a real person's face)."""
+"""Replaceable image layer.
+
+IMAGE_MODE=faithful (default): re-render the SOURCE photo as a cinematic version of the same scene.
+IMAGE_MODE=creative: reference-aware illustrations (old behaviour).
+Stories with minors, or without a usable source image, always use the creative path.
+"""
 from __future__ import annotations
 
 import io
@@ -19,12 +23,20 @@ from .visual_analyzer import ahash, hamming
 ARTICLE_ASPECT = "16:9"
 FACEBOOK_ASPECT = "1:1"    # square image for the Facebook post
 
+FAITHFUL = "faithful_restyle"
+
 NEGATIVE = (
     "unrelated person, different animal, different vehicle, different building, "
     "generic location, duplicate composition, copied source photograph, "
     "distorted face, recognizable real person's face, extra limbs, "
     "deformed anatomy, random text, captions, watermark, logo, "
     "low quality, blurry subject, duplicate subject, invented factual details"
+)
+
+NEGATIVE_FAITHFUL = (
+    "cartoon, illustration, painting, anime, 3d render, extra people, missing people, "
+    "changed faces, changed clothing, different background, added objects, "
+    "random text, captions, watermark, logo, blurry, distorted anatomy"
 )
 
 
@@ -62,10 +74,45 @@ def build_provider(cfg: Settings, gem: GeminiClient) -> ImageProvider:
     return CloudflareImageProvider(CloudflareClient(cfg))
 
 
+# ------------------------------------------------------------------ helpers
+def crop_to_aspect(ref: tuple[bytes, str], aspect: str) -> tuple[bytes, str]:
+    """Crop the source photo to the target aspect ratio (top-biased: faces are usually in the upper part)."""
+    data, mime = ref
+
+    try:
+        a, b = aspect.split(":", 1)
+        target = float(a) / float(b)
+
+        img = Image.open(io.BytesIO(data))
+        img.load()
+        img = img.convert("RGB")
+
+        w, h = img.size
+        current = w / h
+
+        if abs(current - target) > 0.02:
+            if current > target:
+                new_w = int(round(h * target))
+                left = (w - new_w) // 2
+                img = img.crop((left, 0, left + new_w, h))
+            else:
+                new_h = int(round(w / target))
+                top = int((h - new_h) * 0.25)
+                img = img.crop((0, top, w, top + new_h))
+
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=90)
+
+        return buf.getvalue(), "image/jpeg"
+
+    except Exception:
+        return data, mime
+
+
 # ------------------------------------------------------------------ strategy
 def choose_strategy(v: VisualAnalysis, has_ref: bool, people_style: str) -> tuple[str, str]:
     """
-    Return (strategy, style).
+    Return (strategy, style) for the creative path.
 
     - Real people are never recreated photorealistically.
     - Reference identity is used only for identity-critical NON-HUMAN subjects.
@@ -95,6 +142,27 @@ def choose_strategy(v: VisualAnalysis, has_ref: bool, people_style: str) -> tupl
     return "editorial", "editorial illustration"
 
 
+def _faithful_prompt(style_text: str, aspect: str, simple: bool) -> str:
+    parts = [
+        f"Aspect ratio {aspect}.",
+        "The attached image is the SOURCE PHOTOGRAPH.",
+        "Re-render it as a faithful cinematic version of the SAME scene.",
+        (
+            "Keep exactly the same subjects, the same number of people, the same faces, expressions, poses, "
+            "clothing, objects, setting, background layout and framing."
+        ),
+        "Do not add, remove, replace or invent any person, animal, object, text or detail.",
+        f"Change only the visual treatment: {style_text}.",
+        "Photorealistic photograph look. Not a cartoon, not an illustration, not a painting.",
+        "No text, no captions, no watermark, no logo.",
+    ]
+
+    if not simple:
+        parts.append("Avoid: " + NEGATIVE_FAITHFUL + ".")
+
+    return " ".join(parts)
+
+
 def build_prompt(
     strategy: str,
     style: str,
@@ -105,6 +173,9 @@ def build_prompt(
     simple: bool = False,
 ) -> str:
     """Provider-neutral image prompt."""
+    if strategy == FAITHFUL:
+        return _faithful_prompt(style, aspect, simple)
+
     base = [
         f'Create ONE high-quality image for an article titled: "{title}".',
         f"Aspect ratio {aspect}.",
@@ -323,13 +394,15 @@ class ImageGenerator:
         """
         Bounded attempts (cost control).
 
+        Faithful: full+ref, simple+ref (never falls back to an unrelated image).
         With reference: full+ref, simple+ref, simple without ref (editorial fallback).
         Without reference: full, simple.
-        If reference_identity loses its reference it falls back to editorial and
-        never claims identity preservation. A quota error stops immediately.
+        A quota error stops immediately.
         """
-        if ref:
-            plans: list[tuple[bool, tuple[bytes, str] | None]] = [(False, ref), (True, ref), (True, None)]
+        if strategy == FAITHFUL:
+            plans: list[tuple[bool, tuple[bytes, str] | None]] = [(False, ref), (True, ref)]
+        elif ref:
+            plans = [(False, ref), (True, ref), (True, None)]
         else:
             plans = [(False, None), (True, None)]
 
@@ -346,7 +419,7 @@ class ImageGenerator:
             try:
                 logger.log(
                     "IMAGE",
-                    f"{kind}: generating ({strat}/{sty}, attempt {i}/{max_attempts}, ref={'yes' if r else 'no'})",
+                    f"{kind}: generating ({strat}, attempt {i}/{max_attempts}, ref={'yes' if r else 'no'})",
                 )
                 data, _mime = self.provider.generate(prompt, [r] if r else None, aspect)
 
@@ -388,7 +461,7 @@ class ImageGenerator:
 
             logger.log("IMAGE", f"{kind}: validation passed")
 
-            return sha, ah, f"{strat}/{sty}"
+            return sha, ah, strat
 
         raise ImageGenError(f"{kind}: no valid image after attempts")
 
@@ -408,19 +481,37 @@ class ImageGenerator:
         known: list[tuple[str, str]],
     ) -> ImageResult:
         """
-        Generate the article image and (optionally) a separate Facebook image.
+        Generate the article image (16:9) and, optionally, a separate square Facebook image.
 
         Unique filenames per story: {story_id}_generated.jpg / {story_id}_facebook.jpg
         """
-        strategy, style = choose_strategy(v, bool(source_ref), self.cfg.people_image_style)
-
-        use_ref = source_ref if strategy == "reference_identity" else None
-
-        confidence = (
-            v.identity_confidence
-            if (strategy == "reference_identity" and source_ref is not None and v.reference_required)
-            else "low"
+        faithful = (
+            self.cfg.image_mode == "faithful"
+            and source_ref is not None
+            and not v.involves_minors
         )
+
+        if faithful:
+            strategy, style = FAITHFUL, self.cfg.cinematic_style
+            article_ref = crop_to_aspect(source_ref, ARTICLE_ASPECT)
+            facebook_ref = crop_to_aspect(source_ref, FACEBOOK_ASPECT)
+            check_ahash = ""            # the output is SUPPOSED to resemble the source
+            confidence = v.identity_confidence
+            reference_used = True
+        else:
+            if self.cfg.image_mode == "faithful":
+                reason = "minors involved" if v.involves_minors else "no usable source image"
+                logger.warn("IMAGE", f"faithful mode not possible ({reason}); using creative path")
+
+            strategy, style = choose_strategy(v, bool(source_ref), self.cfg.people_image_style)
+            article_ref = facebook_ref = source_ref if strategy == "reference_identity" else None
+            check_ahash = source_ahash
+            confidence = (
+                v.identity_confidence
+                if (strategy == "reference_identity" and source_ref is not None and v.reference_required)
+                else "low"
+            )
+            reference_used = article_ref is not None
 
         summary = v.summary or article.description
         out = self.cfg.images_dir / f"{story_id}_generated.jpg"
@@ -433,9 +524,9 @@ class ImageGenerator:
             scene_idea=article_scene,
             title=title,
             aspect=ARTICLE_ASPECT,
-            ref=use_ref,
+            ref=article_ref,
             known=known,
-            source_ahash=source_ahash,
+            source_ahash=check_ahash,
             out_path=out,
             summary=summary,
         )
@@ -451,9 +542,9 @@ class ImageGenerator:
             source_image_hash=source_sha,
             source_image_ahash=source_ahash,
             notes=(
-                "Identity preservation depends on provider/model capabilities; "
-                f"provider={self.cfg.image_provider}; used={used}; "
-                f"reference_used={'yes' if use_ref else 'no'}"
+                "Output fidelity depends on provider/model capabilities; "
+                f"mode={self.cfg.image_mode}; provider={self.cfg.image_provider}; used={used}; "
+                f"reference_used={'yes' if reference_used else 'no'}"
             ),
         )
 
@@ -469,9 +560,10 @@ class ImageGenerator:
                     scene_idea=facebook_scene,
                     title=title,
                     aspect=FACEBOOK_ASPECT,
-                    ref=use_ref,
-                    known=[*known, (sha, ah)],
-                    source_ahash=source_ahash,
+                    ref=facebook_ref,
+                    # Faithful: both images derive from the same photo, so do not compare them.
+                    known=known if faithful else [*known, (sha, ah)],
+                    source_ahash=check_ahash,
                     out_path=fb_out,
                     summary=summary,
                 )
@@ -479,6 +571,13 @@ class ImageGenerator:
                 res.facebook_path = str(fb_out)
                 res.facebook_image_hash = fb_sha
                 res.facebook_image_ahash = fb_ah
+
+            except ImageQuotaError as exc:
+                logger.warn("IMAGE", f"facebook image skipped (quota): reusing article image ({exc})")
+
+                res.facebook_path = res.path
+                res.facebook_image_hash = sha
+                res.facebook_image_ahash = ah
 
             except ImageGenError as exc:
                 logger.warn("IMAGE", f"facebook image failed; reusing article image ({exc})")
