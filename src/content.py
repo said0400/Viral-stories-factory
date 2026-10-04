@@ -287,7 +287,7 @@ If everything is supported, return an empty unsupported_claims list and all_clai
 
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _PLACEHOLDER_RE = re.compile(r"\{BLOGGER_URL\}")
-_DISCLOSURE = "الصورة المرفقة مُولَّدة بالذكاء الاصطناعي لأغراض توضيحية."
+_DISCLOSURE = "الصورة المرفقة معدَّلة أو مُولَّدة بالذكاء الاصطناعي لأغراض توضيحية."
 
 
 # ---------------------------------------------------------------- sanitising
