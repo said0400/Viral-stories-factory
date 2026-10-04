@@ -28,6 +28,10 @@ _RETRYABLE_WORDS = (
     "connection error",
 )
 
+# Calls with these tags use the strong model chain (GEMINI_CONTENT_MODEL + fallbacks).
+# Everything else (triage, visual analysis, image check) uses the cheaper GEMINI_MODEL.
+_STRONG_TAGS = {"CONTENT", "FACTCHECK"}
+
 
 class GeminiError(Exception):
     """Base exception for Gemini failures."""
@@ -99,6 +103,21 @@ class GeminiClient:
         n = max(0, int(self.cfg.max_retries))
         base = [2.0, 5.0, 10.0, 20.0] + [20.0] * max(0, n - 4)
         return base[:n]
+
+    def _model_chain(self, tag: str) -> list[str]:
+        if tag in _STRONG_TAGS:
+            chain = list(self.cfg.content_models)
+        else:
+            chain = [self.cfg.gemini_model, self.cfg.gemini_fallback_model]
+
+        out: list[str] = []
+
+        for name in chain:
+            name = (name or "").strip()
+            if name and name not in out:
+                out.append(name)
+
+        return out
 
     # ------------------------------------------------------------------
     # JSON generation
@@ -212,12 +231,11 @@ class GeminiClient:
         temperature: float = 0.7,
         tag: str = "GEMINI",
     ) -> T:
-        """Structured output validated against a Pydantic schema (primary model, then fallback)."""
-        models = [self.cfg.gemini_model]
-        fallback = (self.cfg.gemini_fallback_model or "").strip()
+        """Structured output validated against a Pydantic schema, walking the model chain for `tag`."""
+        models = self._model_chain(tag)
 
-        if fallback and fallback not in models:
-            models.append(fallback)
+        if not models:
+            raise GeminiError("No Gemini model configured")
 
         last: GeminiError | None = None
 
