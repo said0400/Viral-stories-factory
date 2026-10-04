@@ -50,6 +50,7 @@ class GeminiClient:
         self.cfg = cfg
         self._client: Any = None
         self._image_client: Any = None
+        self._exhausted: set[str] = set()   # models whose quota is gone for this run
 
         if cfg.gemini_api_key:
             try:
@@ -193,18 +194,27 @@ class GeminiClient:
                     model=model, contents=contents, config=config
                 )
             except Exception as exc:
+                if self._is_quota_exhausted(exc):
+                    self._exhausted.add(model)
+                    logger.warn(
+                        tag,
+                        f"{model}: quota exhausted (limit 0 or daily cap); "
+                        "skipping this model for the rest of the run",
+                    )
+                    raise GeminiError(f"quota exhausted on {model}") from exc
+
                 if attempt < attempts and self._retryable(exc):
                     delay = delays[attempt - 1]
                     logger.warn(
                         tag,
                         f"Transient API error on {model} (attempt {attempt}/{attempts}), "
-                        f"retrying in {delay}s: {exc}",
+                        f"retrying in {delay}s: {str(exc)[:200]}",
                     )
                     time.sleep(delay)
                     continue
 
-                logger.error(tag, f"API error on {model} (attempt {attempt}/{attempts}): {exc}")
-                raise GeminiError(f"API error on {model}: {exc}") from exc
+                logger.error(tag, f"API error on {model} (attempt {attempt}/{attempts}): {str(exc)[:300]}")
+                raise GeminiError(f"API error on {model}: {str(exc)[:300]}") from exc
 
             try:
                 return self._parse(response, schema, model)
@@ -232,16 +242,16 @@ class GeminiClient:
         tag: str = "GEMINI",
     ) -> T:
         """Structured output validated against a Pydantic schema, walking the model chain for `tag`."""
-        models = self._model_chain(tag)
+        models = [m for m in self._model_chain(tag) if m not in self._exhausted]
 
         if not models:
-            raise GeminiError("No Gemini model configured")
+            raise GeminiError("All configured Gemini models have exhausted their quota")
 
         last: GeminiError | None = None
 
         for index, name in enumerate(models):
             try:
-                return self._generate_json_model(
+                result = self._generate_json_model(
                     name,
                     prompt,
                     schema,
@@ -250,6 +260,9 @@ class GeminiClient:
                     temperature=temperature,
                     tag=tag,
                 )
+                logger.log(tag, f"model used: {name}")
+                return result
+
             except GeminiError as exc:
                 last = exc
                 if index < len(models) - 1:
@@ -364,7 +377,7 @@ class GeminiClient:
                     logger.warn(
                         tag,
                         f"Transient image error on {model} (attempt {attempt}/{attempts}), "
-                        f"retrying in {delay}s: {exc}",
+                        f"retrying in {delay}s: {str(exc)[:200]}",
                     )
                     time.sleep(delay)
                     continue
