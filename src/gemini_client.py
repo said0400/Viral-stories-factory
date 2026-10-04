@@ -32,6 +32,9 @@ _RETRYABLE_WORDS = (
 # Everything else (triage, visual analysis, image check) uses the cheaper GEMINI_MODEL.
 _STRONG_TAGS = {"CONTENT", "FACTCHECK"}
 
+# While another model is still available in the chain, give up on a struggling model after this many attempts.
+_ATTEMPTS_BEFORE_FALLBACK = 2
+
 
 class GeminiError(Exception):
     """Base exception for Gemini failures."""
@@ -156,6 +159,7 @@ class GeminiClient:
         system: str | None,
         temperature: float,
         tag: str,
+        max_attempts: int | None = None,
     ) -> T:
         if not self._client:
             raise GeminiError("Gemini client is not configured (missing GEMINI_API_KEY)")
@@ -186,6 +190,10 @@ class GeminiClient:
             raise GeminiError(f"Failed to build Gemini config: {exc}") from exc
 
         delays = self._delays()
+
+        if max_attempts is not None:
+            delays = delays[: max(0, int(max_attempts) - 1)]
+
         attempts = len(delays) + 1
 
         for attempt in range(1, attempts + 1):
@@ -250,6 +258,8 @@ class GeminiClient:
         last: GeminiError | None = None
 
         for index, name in enumerate(models):
+            is_last = index == len(models) - 1
+
             try:
                 result = self._generate_json_model(
                     name,
@@ -259,14 +269,15 @@ class GeminiClient:
                     system=system,
                     temperature=temperature,
                     tag=tag,
+                    max_attempts=None if is_last else _ATTEMPTS_BEFORE_FALLBACK,
                 )
                 logger.log(tag, f"model used: {name}")
                 return result
 
             except GeminiError as exc:
                 last = exc
-                if index < len(models) - 1:
-                    logger.warn(tag, f"Model '{name}' failed ({exc}). Falling back to '{models[index + 1]}'")
+                if not is_last:
+                    logger.warn(tag, f"Model '{name}' failed ({str(exc)[:200]}). Falling back to '{models[index + 1]}'")
                     continue
                 raise
 
