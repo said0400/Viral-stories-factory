@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 
 DEFAULT_EXPORTS_DIR = "data/exports"
 DEFAULT_CF_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b"
+DEFAULT_CONTENT_MODEL = "gemini-3.8-flash"
+DEFAULT_CONTENT_FALLBACKS = "gemini-3.6-flash,gemini-3.5-flash,gemini-2.5-flash"
 
 
 def _raw(key: str, env: Mapping[str, str] | None) -> str | None:
@@ -88,8 +90,10 @@ class Settings:
     day_timezone: str = "Africa/Casablanca"
 
     # --- gemini
-    gemini_model: str = "gemini-3.5-flash-lite"
+    gemini_model: str = "gemini-3.5-flash-lite"            # triage / visual / image check
     gemini_fallback_model: str = "gemini-2.5-flash"
+    gemini_content_model: str = DEFAULT_CONTENT_MODEL        # article / posts / titles / fact check
+    gemini_content_fallbacks: str = DEFAULT_CONTENT_FALLBACKS  # comma separated
     gemini_image_model: str = "gemini-3.1-flash-lite-image"
     gemini_api_key: str = ""
     image_api_key: str = ""
@@ -171,10 +175,12 @@ class Settings:
             "user_agent": "ViralStoriesFactoryBot/1.0",
             "day_timezone": "Africa/Casablanca",
             "cloudflare_image_model": DEFAULT_CF_IMAGE_MODEL,
+            "gemini_content_model": DEFAULT_CONTENT_MODEL,
         }
         for name, default in defaults.items():
             put(name, str(getattr(self, name) or "").strip() or default)
 
+        put("gemini_content_fallbacks", str(self.gemini_content_fallbacks or "").strip())
         put("cloudflare_account_id", str(self.cloudflare_account_id or "").strip())
         put("cloudflare_api_token", str(self.cloudflare_api_token or "").strip())
         put("public_images_base", str(self.public_images_base or "").strip().rstrip("/"))
@@ -202,6 +208,8 @@ class Settings:
             day_timezone=_str("DAY_TIMEZONE", "Africa/Casablanca", env),
             gemini_model=_str("GEMINI_MODEL", "gemini-3.5-flash-lite", env),
             gemini_fallback_model=_str("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash", env),
+            gemini_content_model=_str("GEMINI_CONTENT_MODEL", DEFAULT_CONTENT_MODEL, env),
+            gemini_content_fallbacks=_str("GEMINI_CONTENT_FALLBACKS", DEFAULT_CONTENT_FALLBACKS, env),
             gemini_image_model=_str("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-lite-image", env),
             gemini_api_key=_str("GEMINI_API_KEY", "", env),
             image_api_key=_str("IMAGE_API_KEY", "", env),
@@ -236,7 +244,7 @@ class Settings:
         )
 
     # ------------------------------------------------------------------
-    # Derived paths
+    # Derived values
     @property
     def images_dir(self) -> Path:
         return Path(self.data_dir) / "images"
@@ -251,6 +259,19 @@ class Settings:
     @property
     def needs_images(self) -> bool:
         return (not self.dry_run) or self.dry_run_generate_images
+
+    @property
+    def content_models(self) -> list[str]:
+        """Model chain for the writing + fact-check steps (strongest first, de-duplicated)."""
+        names = [self.gemini_content_model, *self.gemini_content_fallbacks.split(",")]
+        out: list[str] = []
+
+        for name in names:
+            name = name.strip()
+            if name and name not in out:
+                out.append(name)
+
+        return out
 
     # ------------------------------------------------------------------
     # Readiness
