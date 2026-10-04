@@ -17,7 +17,7 @@ from .utils import sha256_hex
 from .visual_analyzer import ahash, hamming
 
 ARTICLE_ASPECT = "16:9"
-FACEBOOK_ASPECT = "16:9"   # closest supported ratio to Facebook's 1.91:1 link image
+FACEBOOK_ASPECT = "1:1"    # square image for the Facebook post
 
 NEGATIVE = (
     "unrelated person, different animal, different vehicle, different building, "
