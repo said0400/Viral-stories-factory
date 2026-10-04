@@ -551,11 +551,23 @@ def rank_score(item: TriageItem) -> float:
 
 
 # ---------------------------------------------------------------- generation
+MAX_FIX_ROUNDS = 2  # correction rounds after the first draft (each round = 1 rewrite + 1 fact check)
+
+
+def _clip(text: str, limit: int = 220) -> str:
+    return " ".join(str(text or "").split())[:limit]
+
+
+def _claims(check: FactCheckSchema) -> list[str]:
+    return [str(c).strip() for c in (check.unsupported_claims or []) if str(c).strip()]
+
+
 def generate_content(
     gem: GeminiClient,
     article: SourceArticle,
     avoid_titles: list[str],
     feedback: str = "",
+    previous: GeneratedContent | None = None,
 ) -> GeneratedContent:
     text = article.article_text or article.description
     date = article.publication_date.date() if article.publication_date else "unknown"
@@ -567,15 +579,30 @@ def generate_content(
         f"SOURCE TEXT:\n{text[:9000]}\n\n"
         "TITLES ALREADY USED (do not repeat or closely resemble):\n"
         + "\n".join(f"- {t}" for t in avoid_titles[:40] if str(t).strip())
-        + (
-            "\n\nCORRECTIONS REQUIRED (remove or fix these claims / follow these instructions):\n"
-            + feedback
-            if feedback
-            else ""
-        )
     )
 
-    res = gem.generate_json(prompt, ContentSchema, system=CONTENT_SYSTEM, temperature=0.5, tag="CONTENT")
+    if feedback:
+        prompt += (
+            "\n\nCORRECTIONS REQUIRED (remove or fix these claims / follow these instructions):\n"
+            + feedback
+        )
+
+        if previous is not None:
+            prompt += (
+                "\n\nPREVIOUS DRAFT (JSON). Return the SAME structure. Keep everything that the SOURCE TEXT "
+                "supports, keep the same style and length, and change ONLY what is needed to apply the "
+                "corrections above. Also remove the same kind of unsupported detail anywhere else it appears "
+                "(article, SEO description, Facebook fields and scene ideas):\n"
+                + previous.model_dump_json()
+            )
+
+    res = gem.generate_json(
+        prompt,
+        ContentSchema,
+        system=CONTENT_SYSTEM,
+        temperature=0.3 if previous is not None else 0.5,
+        tag="CONTENT",
+    )
 
     data = res.model_dump()
 
@@ -626,22 +653,29 @@ def generate_verified(
     history_titles: list[str],
     is_title_taken: Callable[[str], bool],
 ) -> GeneratedContent:
-    """Generate -> fact-check -> corrective regeneration -> title-dedup check."""
+    """Generate -> fact-check -> up to MAX_FIX_ROUNDS corrective edits of the SAME draft -> title-dedup check."""
     content = generate_content(gem, article, history_titles)
 
-    for attempt in range(2):
+    for round_no in range(MAX_FIX_ROUNDS + 1):
         check = fact_check(gem, article, content)
+        claims = _claims(check)
 
-        if check.all_claims_supported and not check.unsupported_claims:
+        if not claims:
             break
 
-        logger.warn("FACTCHECK", f"{len(check.unsupported_claims)} unsupported claim(s); regenerating")
+        logger.warn("FACTCHECK", f"{len(claims)} unsupported claim(s) (check {round_no + 1}/{MAX_FIX_ROUNDS + 1})")
 
-        if attempt == 1:
-            raise ValueError("content still contains unsupported claims")
+        for claim in claims[:6]:
+            logger.warn("FACTCHECK", f"  - {_clip(claim)}")
 
-        feedback = "\n".join(f"- {c}" for c in check.unsupported_claims)
-        content = generate_content(gem, article, history_titles, feedback=feedback)
+        if round_no >= MAX_FIX_ROUNDS:
+            raise ValueError(
+                f"content still contains {len(claims)} unsupported claim(s) "
+                f"after {MAX_FIX_ROUNDS} correction rounds"
+            )
+
+        feedback = "\n".join(f"- {c}" for c in claims)
+        content = generate_content(gem, article, history_titles, feedback=feedback, previous=content)
 
     if is_title_taken(content.blogger_title):
         logger.warn("CONTENT", "title too similar to history; asking for a new title")
@@ -655,16 +689,17 @@ def generate_verified(
                 "preserving exactly the same verified source facts. "
                 "Do not introduce any new factual claim."
             ),
+            previous=content,
         )
 
-        final_check = fact_check(gem, article, content)
+        final_claims = _claims(fact_check(gem, article, content))
 
-        if not final_check.all_claims_supported or final_check.unsupported_claims:
-            logger.warn(
-                "FACTCHECK",
-                "title regeneration introduced "
-                f"{len(final_check.unsupported_claims)} unsupported claim(s)",
-            )
+        if final_claims:
+            logger.warn("FACTCHECK", f"title regeneration introduced {len(final_claims)} unsupported claim(s)")
+
+            for claim in final_claims[:6]:
+                logger.warn("FACTCHECK", f"  - {_clip(claim)}")
+
             raise ValueError("title regeneration produced unsupported claims")
 
         if is_title_taken(content.blogger_title):
