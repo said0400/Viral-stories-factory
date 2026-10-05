@@ -169,40 +169,34 @@ Examples:
 
 Do not add unrelated SEO labels.
 
-11. article_scene_idea / facebook_scene_idea:
-Write in English.
-Use 1-2 concise sentences.
-Describe a NEW visual scene for an illustration that reflects the story.
+11. facebook_composition_type MUST be strictly one of these 4 photojournalism layouts based on the story:
+- "DIPTYCH_SPLIT": Use when comparing two people, before/after, two places, or two related perspectives side-by-side.
+- "MAIN_PLUS_DETAIL": Use when the story relies on a main subject PLUS a specific close-up item/detail (e.g., face + bandaged finger, car + towing detail).
+- "FOREGROUND_BACKGROUND": Use when showing an action or main subject sharp in the foreground with essential context in the background.
+- "SINGLE_HERO": Use when one dramatic subject or place carries the whole narrative.
 
-The visual scene MUST:
-- use only facts supported by the source
-- avoid invented locations
-- avoid invented objects
-- avoid invented people
-- avoid invented clothing
-- avoid invented weather
-- avoid invented architecture
-- avoid invented actions
-- avoid invented emotions
-- avoid invented injuries
-- avoid invented relationships
-- avoid invented background details
+12. article_scene_idea / facebook_scene_idea:
+Write in English (1-3 concise sentences).
+Describe a realistic EDITORIAL PRESS PHOTOGRAPH that reflects the story according to the chosen facebook_composition_type.
 
-Do not describe the face of any real person.
-Do not request facial recognition.
-Do not request facial reconstruction.
-Do not guess a person's identity from appearance.
+STRICT VISUAL RULES:
+- MUST look like an authentic, raw, unedited press news photograph taken on a real camera.
+- NEVER request illustrations, 3D renders, drawings, artwork, posters, or cartoons.
+- STRICTLY FORBIDDEN: Any embedded text, headlines, subtitles, watermarks, logos, graphic frames, yellow/red borders, or arrows.
+- Use ONLY factual elements supported by the source text.
+- Avoid invented locations, objects, people, clothing, weather, or actions not supported by the story.
+- Do not describe or guess the exact face of any real identifiable person.
 
-12. REAL PEOPLE:
+13. REAL PEOPLE:
 When real people are part of the story, describe only factual/contextual information supported by the source.
 Never invent facial features, expressions, age appearance, ethnicity, identity or other sensitive characteristics.
 The image generation system may use a supplied reference image where permitted, but the editorial text itself must never claim that an exact identity or likeness has been established.
 
-13. MINORS:
+14. MINORS:
 If minors are part of the story, do not request identifiable facial depictions.
 Prefer a non-identifying, indirect or contextual visual treatment.
 
-14. SOURCE IMAGE:
+15. SOURCE IMAGE:
 A source image is a reference for the story and subject only.
 It must NOT be treated as a request to reproduce the original image exactly.
 
@@ -212,25 +206,25 @@ When suggesting a new visual:
 - do not invent new factual events
 - do not turn an illustrative scene into a claim that the event happened exactly that way
 
-15. NON-HUMAN SUBJECTS:
+16. NON-HUMAN SUBJECTS:
 For animals, vehicles, buildings, places, objects and other specific non-human subjects, preserve important identifying characteristics supported by the source or reference image.
 Do not invent markings, colors, damage, architecture, model numbers or other identity-critical details.
 
-16. UNCERTAINTY:
+17. UNCERTAINTY:
 If the source does not establish a detail, omit it or clearly mark it as uncertain.
 Never use a plausible assumption as a factual detail.
 
-17. FACTUAL PRIORITY:
+18. FACTUAL PRIORITY:
 Accuracy is more important than drama.
 If a dramatic visual or sentence would require inventing a fact, do not use it.
 
-18. SEO:
+19. SEO:
 seo_description must be <= 155 characters in Arabic.
 Keep it natural.
 No keyword stuffing.
 Do not add facts that are not supported by the source.
 
-19. FINAL CONSISTENCY:
+20. FINAL CONSISTENCY:
 blogger_title, facebook_title, facebook_post, first_comment_hook, article_scene_idea and facebook_scene_idea must all remain consistent with the same source facts.
 Do not introduce a new factual claim in one field that is absent from the article/source."""
 
@@ -612,6 +606,11 @@ def generate_content(
     data["first_comment_hook"] = _strip_urls(data["first_comment_hook"])
     data["seo_description"] = str(data["seo_description"] or "").strip()[:155].rstrip()
 
+    comp_type = str(data.get("facebook_composition_type", "SINGLE_HERO")).strip().upper()
+    if comp_type not in {"DIPTYCH_SPLIT", "MAIN_PLUS_DETAIL", "FOREGROUND_BACKGROUND", "SINGLE_HERO"}:
+        comp_type = "SINGLE_HERO"
+    data["facebook_composition_type"] = comp_type
+
     labels: list[str] = []
 
     for label in data.get("labels") or []:
@@ -641,6 +640,7 @@ def fact_check(
         f"FIRST COMMENT:\n{content.first_comment_hook}\n\n"
         f"ARTICLE SCENE IDEA:\n{content.article_scene_idea}\n\n"
         f"FACEBOOK SCENE IDEA:\n{content.facebook_scene_idea}\n\n"
+        f"FACEBOOK COMPOSITION TYPE:\n{content.facebook_composition_type}\n\n"
         "Check every factual claim against SOURCE TEXT."
     )
 
