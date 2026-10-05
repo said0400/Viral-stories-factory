@@ -48,8 +48,9 @@ class GeneratedContent(BaseModel):
     facebook_post: str          # no URL inside; URL is added after Blogger succeeds
     first_comment_hook: str
     article_scene_idea: str
-    facebook_scene_idea: str
-    facebook_composition_type: str = "SINGLE_HERO"
+    facebook_scene_idea: str          # Main Photo (Background)
+    facebook_detail_scene_idea: str = "" # Secondary Inset Photo (Circle/Square)
+    facebook_composition_type: str = "INSET_CIRCLE"
 
 
 class ImageResult(BaseModel):
@@ -210,6 +211,7 @@ class ContentSchema(BaseModel):
     first_comment_hook: str
     article_scene_idea: str
     facebook_scene_idea: str
+    facebook_detail_scene_idea: str
     facebook_composition_type: str
 
 
