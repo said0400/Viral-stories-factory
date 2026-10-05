@@ -1,12 +1,10 @@
 """Replaceable image layer.
 
-IMAGE_MODE=faithful (default): re-render the SOURCE photo as a cinematic version of the same scene (article image).
+IMAGE_MODE=faithful (default): re-render the SOURCE photo as a cinematic version of the same scene.
 IMAGE_MODE=creative: reference-aware editorial photojournalism.
-Stories with minors, or without a usable source image, always use the creative path.
 
-FACEBOOK_IMAGE_MODE=photo (default): the Facebook image is composed from the article's own photos
-(no AI, no filter, no text). If no photo passes screening, a natural realistic generated image is used.
-All generated images follow a strict photojournalism standard: raw press photograph, zero text, zero graphics, zero borders.
+FACEBOOK_IMAGE_MODE=photo: real screened photos or dynamic composite AI-generated photo.
+Facebook generated images construct professional compositions with programmatic circular/square inset overlays.
 """
 from __future__ import annotations
 
@@ -14,7 +12,7 @@ import io
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from PIL import Image, ImageStat
+from PIL import Image, ImageDraw, ImageOps, ImageStat
 
 from . import logger
 from .cloudflare_client import CloudflareClient
@@ -203,10 +201,9 @@ def build_prompt(
             "Left side shows one key aspect of the story, right side shows the second related aspect. "
             f"Scene description: {scene_idea}."
         )
-    elif "DETAIL" in comp or "MAIN_PLUS" in comp:
+    elif "DETAIL" in comp or "MAIN_PLUS" in comp or "INSET" in comp:
         base.append(
-            "COMPOSITION LAYOUT: Dynamic press photograph featuring a clear main subject in frame, "
-            "with a sharp focal point on a crucial secondary detail within the same real-life environment. "
+            "COMPOSITION LAYOUT: Dynamic press photograph featuring a clear main subject in frame. "
             f"Scene description: {scene_idea}."
         )
     elif "FOREGROUND" in comp:
@@ -281,6 +278,68 @@ def build_prompt(
         base.append("Avoid: " + NEGATIVE + ".")
 
     return " ".join(base)
+
+
+# ------------------------------------------------------------------ PROGRAMMATIC INSET COMPOSITION
+def create_circle_mask(size: int) -> Image.Image:
+    """Anti-aliased circle mask."""
+    mask = Image.new("L", (size * 4, size * 4), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.ellipse((0, 0, size * 4 - 1, size * 4 - 1), fill=255)
+    return mask.resize((size, size), Image.LANCZOS)
+
+
+def composite_inset(
+    main_bytes: bytes,
+    detail_bytes: bytes,
+    shape: str = "INSET_CIRCLE",
+) -> bytes:
+    """Programmatically overlay detail image over the main image at top-right corner."""
+    try:
+        main_img = Image.open(io.BytesIO(main_bytes)).convert("RGB")
+        detail_img = Image.open(io.BytesIO(detail_bytes)).convert("RGB")
+
+        # Standardize main canvas to 1080x1080
+        main_img = ImageOps.fit(main_img, (1080, 1080), Image.LANCZOS)
+
+        # Size of the inset: 32% of canvas (345x345 px)
+        inset_size = 345
+        margin = 35
+        border_width = 8
+
+        detail_cropped = ImageOps.fit(detail_img, (inset_size, inset_size), Image.LANCZOS)
+
+        # Position: Top Right
+        x = 1080 - inset_size - margin
+        y = margin
+
+        if shape == "INSET_SQUARE":
+            # Square with clean subtle white border
+            border_box = (x - border_width, y - border_width, x + inset_size + border_width, y + inset_size + border_width)
+            draw = ImageDraw.Draw(main_img)
+            draw.rectangle(border_box, fill=(240, 240, 240))
+            main_img.paste(detail_cropped, (x, y))
+
+        else:  # INSET_CIRCLE
+            # Circle with clean yellow ring
+            outer_size = inset_size + (border_width * 2)
+            ring_img = Image.new("RGB", (outer_size, outer_size), (255, 204, 0))  # Bright yellow ring
+            ring_mask = create_circle_mask(outer_size)
+
+            inset_mask = create_circle_mask(inset_size)
+
+            # Paste Ring
+            main_img.paste(ring_img, (x - border_width, y - border_width), ring_mask)
+            # Paste Detail Circle
+            main_img.paste(detail_cropped, (x, y), inset_mask)
+
+        buf = io.BytesIO()
+        main_img.save(buf, "JPEG", quality=90, optimize=True)
+        return buf.getvalue()
+
+    except Exception as exc:
+        logger.warn("IMAGE", f"composite_inset failed ({exc}); returning main image")
+        return main_bytes
 
 
 # ------------------------------------------------------------------ validation
@@ -378,11 +437,7 @@ def fidelity_check(
     result_jpeg: bytes,
     forbid_text: bool = False,
 ) -> tuple[bool, str]:
-    """Faithful-path quality gate: is the result a faithful restyle of the SOURCE photo? Fail-open.
-
-    relevant_to_story and obvious_defects always decide. The text field decides only when
-    `forbid_text` is set (Facebook), because the article source itself may legitimately contain text.
-    """
+    """Faithful-path quality gate: is the result a faithful restyle of the SOURCE photo? Fail-open."""
     text_rule = (
         "contains_text_or_watermark = true if Image 2 shows ANY visible text, letters, captions, "
         "subtitles, watermark or logo anywhere in it."
@@ -439,13 +494,11 @@ class ImageGenerator:
 
     @property
     def provider(self) -> ImageProvider:
-        # Built lazily so a dry run without images never needs image credentials.
         if self._provider is None:
             self._provider = build_provider(self.cfg, self.gem)
         return self._provider
 
     def _keep_rejected(self, data: bytes, name: str) -> None:
-        """Dry runs only: keep rejected images (and the source) inside the exported artifact for inspection."""
         if not self.cfg.dry_run or not data:
             return
 
@@ -457,7 +510,6 @@ class ImageGenerator:
             pass
 
     def _facebook_photo(self, article: SourceArticle, v: VisualAnalysis, out_path: Path) -> tuple[str, str] | None:
-        """Facebook image from the article's own screened photos. Returns (sha, ahash) or None to use the fallback."""
         if self.cfg.facebook_image_mode != "photo":
             return None
 
@@ -497,6 +549,24 @@ class ImageGenerator:
             logger.warn("IMAGE", f"facebook photo layout failed ({type(exc).__name__}); using generated image")
             return None
 
+    def _one_raw(
+        self,
+        *,
+        strategy: str,
+        style: str,
+        v: VisualAnalysis,
+        scene_idea: str,
+        title: str,
+        aspect: str,
+        ref: tuple[bytes, str] | None,
+        composition_type: str = "SINGLE_HERO",
+    ) -> bytes:
+        prompt = build_prompt(
+            strategy, style, v, scene_idea, title, aspect, composition_type=composition_type, simple=False
+        )
+        data, _mime = self.provider.generate(prompt, [ref] if ref else None, aspect)
+        return data
+
     def _one(
         self,
         *,
@@ -515,14 +585,6 @@ class ImageGenerator:
         composition_type: str = "SINGLE_HERO",
         forbid_text: bool = False,
     ) -> tuple[str, str, str]:
-        """
-        Bounded attempts (cost control).
-
-        Faithful: full+ref, simple+ref (never falls back to an unrelated image).
-        With reference: full+ref, simple+ref, simple without ref (editorial fallback).
-        Without reference: full, simple.
-        A quota error stops immediately.
-        """
         if strategy == FAITHFUL:
             plans: list[tuple[bool, tuple[bytes, str] | None]] = [(False, ref), (True, ref)]
         elif ref:
@@ -613,18 +675,14 @@ class ImageGenerator:
         title: str,
         article_scene: str,
         facebook_scene: str,
-        facebook_composition_type: str = "SINGLE_HERO",
+        facebook_detail_scene: str = "",
+        facebook_composition_type: str = "INSET_CIRCLE",
         source_ref: tuple[bytes, str] | None,
         source_url: str,
         source_sha: str,
         source_ahash: str,
         known: list[tuple[str, str]],
     ) -> ImageResult:
-        """
-        Generate the article image (16:9) and the Facebook image.
-
-        Unique filenames per story: {story_id}_generated.jpg / {story_id}_facebook.jpg
-        """
         faithful = (
             self.cfg.image_mode == "faithful"
             and source_ref is not None
@@ -635,7 +693,7 @@ class ImageGenerator:
             strategy, style = FAITHFUL, self.cfg.cinematic_style
             article_ref = crop_to_aspect(source_ref, ARTICLE_ASPECT)
             facebook_ref = crop_to_aspect(source_ref, FACEBOOK_ASPECT)
-            check_ahash = ""            # the output is SUPPOSED to resemble the source
+            check_ahash = ""
             confidence = v.identity_confidence
             reference_used = True
         else:
@@ -699,41 +757,77 @@ class ImageGenerator:
             res.facebook_image_hash, res.facebook_image_ahash = photo
 
         elif self.cfg.facebook_separate_image:
-            fb_style = REALISTIC_NEWS_STYLE if faithful else style
+            fb_strategy, fb_style = choose_strategy(v, bool(source_ref), self.cfg.people_image_style)
+            facebook_ref_selected = source_ref if fb_strategy == "reference_identity" else None
 
             try:
-                fb_sha, fb_ah, _ = self._one(
-                    kind="facebook",
-                    strategy=strategy,
-                    style=fb_style,
-                    v=v,
-                    scene_idea=facebook_scene,
-                    title=title,
-                    aspect=FACEBOOK_ASPECT,
-                    ref=facebook_ref,
-                    # Faithful: both images derive from the same photo, so do not compare them.
-                    known=known if faithful else [*known, (sha, ah)],
-                    source_ahash=check_ahash,
-                    out_path=fb_out,
-                    summary=summary,
-                    composition_type=facebook_composition_type,
-                    forbid_text=True,
-                )
+                if facebook_detail_scene and facebook_composition_type in {"INSET_CIRCLE", "INSET_SQUARE"}:
+                    logger.log("IMAGE", f"Generating dual-image composite for Facebook ({facebook_composition_type})")
 
-                res.facebook_path = str(fb_out)
-                res.facebook_image_hash = fb_sha
-                res.facebook_image_ahash = fb_ah
+                    main_bytes = self._one_raw(
+                        strategy=fb_strategy,
+                        style=REALISTIC_NEWS_STYLE,
+                        v=v,
+                        scene_idea=facebook_scene,
+                        title=title,
+                        aspect=FACEBOOK_ASPECT,
+                        ref=facebook_ref_selected,
+                        composition_type=facebook_composition_type,
+                    )
+
+                    detail_bytes = self._one_raw(
+                        strategy=fb_strategy,
+                        style=REALISTIC_NEWS_STYLE,
+                        v=v,
+                        scene_idea=facebook_detail_scene,
+                        title=title,
+                        aspect=FACEBOOK_ASPECT,
+                        ref=None,
+                        composition_type="SINGLE_HERO",
+                    )
+
+                    composite_bytes = composite_inset(main_bytes, detail_bytes, shape=facebook_composition_type)
+                    ok, _, fb_img = validate_image(composite_bytes, known)
+
+                    if not fb_img:
+                        fb_img = Image.open(io.BytesIO(composite_bytes))
+
+                    fb_sha, fb_ah = _save_jpeg(fb_img, fb_out)
+
+                    res.facebook_path = str(fb_out)
+                    res.facebook_image_hash = fb_sha
+                    res.facebook_image_ahash = fb_ah
+
+                else:
+                    fb_sha, fb_ah, _ = self._one(
+                        kind="facebook",
+                        strategy=fb_strategy,
+                        style=REALISTIC_NEWS_STYLE,
+                        v=v,
+                        scene_idea=facebook_scene,
+                        title=title,
+                        aspect=FACEBOOK_ASPECT,
+                        ref=facebook_ref_selected,
+                        known=[*known, (sha, ah)],
+                        source_ahash=check_ahash,
+                        out_path=fb_out,
+                        summary=summary,
+                        composition_type=facebook_composition_type,
+                        forbid_text=True,
+                    )
+
+                    res.facebook_path = str(fb_out)
+                    res.facebook_image_hash = fb_sha
+                    res.facebook_image_ahash = fb_ah
 
             except ImageQuotaError as exc:
                 logger.warn("IMAGE", f"facebook image skipped (quota): reusing article image ({exc})")
-
                 res.facebook_path = res.path
                 res.facebook_image_hash = sha
                 res.facebook_image_ahash = ah
 
             except ImageGenError as exc:
                 logger.warn("IMAGE", f"facebook image failed; reusing article image ({exc})")
-
                 res.facebook_path = res.path
                 res.facebook_image_hash = sha
                 res.facebook_image_ahash = ah
