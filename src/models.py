@@ -49,6 +49,7 @@ class GeneratedContent(BaseModel):
     first_comment_hook: str
     article_scene_idea: str
     facebook_scene_idea: str
+    facebook_composition_type: str = "SINGLE_HERO"
 
 
 class ImageResult(BaseModel):
@@ -209,6 +210,7 @@ class ContentSchema(BaseModel):
     first_comment_hook: str
     article_scene_idea: str
     facebook_scene_idea: str
+    facebook_composition_type: str
 
 
 class FactCheckSchema(BaseModel):
