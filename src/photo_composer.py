@@ -1,23 +1,36 @@
-"""Facebook photo layouts built from the story's own source photos (no AI generation, no text)."""
+"""Facebook photo layouts built from the story's own source photos.
+
+No AI generation, no filters, no text: photos are only cropped and placed.
+A photo is used only when a vision check finds no text/logo/watermark, no minors and no collage.
+"""
 from __future__ import annotations
 
 import io
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageOps
+from pydantic import BaseModel
 
 from . import logger
+from .gemini_client import GeminiClient, GeminiError
 from .models import SourceArticle
 from .utils import FetchError, PoliteFetcher
 from .visual_analyzer import ahash, hamming
 
-CANVAS = (1080, 1350)            # 4:5 portrait; use (1080, 1080) for a square image
+CANVAS_SIDE = (1200, 1000)       # two tall photos side by side
+CANVAS_STACK = (1080, 1350)      # two wide photos stacked
 GAP = 8                          # divider between two panels
+BACKGROUND = (12, 14, 18)
 RING = (255, 196, 0)             # yellow ring of the circular inset
 MAX_DOWNLOAD_BYTES = 12 * 1024 * 1024
 MIN_SIDE = 400
+MAX_CANDIDATES = 6
+NATURAL_MAX_SIDE = 1200
+RATIO_MIN = 0.8                  # 4:5
+RATIO_MAX = 1.91                 # 1.91:1
 LAYOUTS = {"auto", "single", "split", "inset"}
 
 
+# ------------------------------------------------------------------ download
 def _load(raw: bytes) -> Image.Image | None:
     if not raw or len(raw) > MAX_DOWNLOAD_BYTES:
         return None
@@ -42,8 +55,12 @@ def _load(raw: bytes) -> Image.Image | None:
     return img
 
 
-def fetch_photos(article: SourceArticle, fetcher: PoliteFetcher, limit: int = 2) -> list[Image.Image]:
-    """Download up to `limit` distinct, usable photos of the article (robots.txt respected by the fetcher)."""
+def fetch_photos(
+    article: SourceArticle,
+    fetcher: PoliteFetcher,
+    limit: int = MAX_CANDIDATES,
+) -> list[Image.Image]:
+    """Download up to `limit` distinct, usable candidate photos (robots.txt respected by the fetcher)."""
     urls: list[str] = []
 
     for u in [article.main_image_url, *article.additional_image_urls]:
@@ -54,7 +71,7 @@ def fetch_photos(article: SourceArticle, fetcher: PoliteFetcher, limit: int = 2)
     photos: list[Image.Image] = []
     hashes: list[str] = []
 
-    for url in urls[:8]:
+    for url in urls[:10]:
         if len(photos) >= limit:
             break
 
@@ -65,7 +82,7 @@ def fetch_photos(article: SourceArticle, fetcher: PoliteFetcher, limit: int = 2)
             continue
 
         try:
-            ctype = (r.headers.get("Content-Type", "").split(";", 1)[0].strip().lower())
+            ctype = r.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
 
             if not ctype.startswith("image/"):
                 continue
@@ -88,7 +105,120 @@ def fetch_photos(article: SourceArticle, fetcher: PoliteFetcher, limit: int = 2)
     return photos
 
 
+# ------------------------------------------------------------------ screening
+class PhotoVerdict(BaseModel):
+    index: int
+    has_text_or_logo: bool
+    has_minors: bool
+    is_collage_or_screenshot: bool
+    reason: str
+
+
+class PhotoScreening(BaseModel):
+    items: list[PhotoVerdict]
+
+
+def _jpeg(img: Image.Image, max_side: int = 1024) -> bytes:
+    copy = img.copy()
+    copy.thumbnail((max_side, max_side))
+    buf = io.BytesIO()
+    copy.save(buf, "JPEG", quality=85)
+    return buf.getvalue()
+
+
+def screen_photos(gem: GeminiClient, photos: list[Image.Image]) -> list[int]:
+    """Indexes of photos that are safe to publish as-is. Fails CLOSED: on any error nothing is approved."""
+    if not photos:
+        return []
+
+    prompt = (
+        f"You receive {len(photos)} photographs numbered from 0 in the order supplied.\n"
+        "For EACH photograph return one item with its index and these judgements:\n"
+        "- has_text_or_logo: true if the photograph shows ANY text overlay, caption, subtitle, watermark, "
+        "website or channel logo, social-media interface, or clearly readable lettering or brand logo anywhere in it.\n"
+        "- has_minors: true if any person who is or may be a child or teenager is visible.\n"
+        "- is_collage_or_screenshot: true if it is a collage, a multi-panel image, a screenshot or a meme "
+        "rather than one single photograph.\n"
+        "- reason: one short sentence.\n"
+        "Judge only what is visible. Do not identify anyone."
+    )
+
+    try:
+        res = gem.generate_json(
+            prompt,
+            PhotoScreening,
+            images=[(_jpeg(p), "image/jpeg") for p in photos],
+            temperature=0.0,
+            tag="IMGCHECK",
+        )
+    except GeminiError as exc:
+        logger.warn("PHOTO", f"photo screening unavailable ({str(exc)[:120]}); real photos will not be used")
+        return []
+    except Exception as exc:
+        logger.warn("PHOTO", f"photo screening error ({type(exc).__name__}); real photos will not be used")
+        return []
+
+    verdicts = {v.index: v for v in res.items if 0 <= v.index < len(photos)}
+    clean: list[int] = []
+
+    for i in range(len(photos)):
+        v = verdicts.get(i)
+
+        if v is None:
+            logger.warn("PHOTO", f"photo {i}: no verdict; skipped")
+            continue
+
+        if v.has_text_or_logo or v.has_minors or v.is_collage_or_screenshot:
+            flags = [
+                name
+                for name, on in (
+                    ("text/logo", v.has_text_or_logo),
+                    ("minors", v.has_minors),
+                    ("collage/screenshot", v.is_collage_or_screenshot),
+                )
+                if on
+            ]
+            logger.log("PHOTO", f"photo {i} rejected ({', '.join(flags)}): {v.reason[:100]}")
+            continue
+
+        clean.append(i)
+
+    return clean
+
+
 # ------------------------------------------------------------------ layout helpers
+def _is_tall(img: Image.Image) -> bool:
+    w, h = img.size
+    return w / h <= 1.1
+
+
+def _natural(img: Image.Image) -> Image.Image:
+    """Keep the photo as it is: crop only when its ratio is outside 4:5 .. 1.91:1, then cap the size."""
+    img = img.convert("RGB")
+    w, h = img.size
+    ratio = w / h
+
+    if ratio < RATIO_MIN:
+        new_h = int(round(w / RATIO_MIN))
+        top = int((h - new_h) * 0.15)
+        img = img.crop((0, top, w, top + new_h))
+    elif ratio > RATIO_MAX:
+        new_w = int(round(h * RATIO_MAX))
+        left = (w - new_w) // 2
+        img = img.crop((left, 0, left + new_w, h))
+
+    longest = max(img.size)
+
+    if longest > NATURAL_MAX_SIDE:
+        scale = NATURAL_MAX_SIDE / longest
+        img = img.resize(
+            (max(1, int(round(img.size[0] * scale))), max(1, int(round(img.size[1] * scale)))),
+            Image.LANCZOS,
+        )
+
+    return img
+
+
 def _cover(img: Image.Image, size: tuple[int, int], bias: float = 0.25) -> Image.Image:
     """Fill `size` completely (crops). `bias` keeps the upper part, where faces usually are."""
     w, h = size
@@ -102,33 +232,6 @@ def _cover(img: Image.Image, size: tuple[int, int], bias: float = 0.25) -> Image
     top = int((nh - h) * bias)
 
     return img.crop((left, top, left + w, top + h))
-
-
-def _blur_fill(img: Image.Image, size: tuple[int, int]) -> Image.Image:
-    """Whole photo, never cropped: sharp copy centred over a blurred, darkened copy of itself."""
-    w, h = size
-
-    bg = _cover(img, size, 0.5).filter(ImageFilter.GaussianBlur(28))
-    bg = ImageEnhance.Brightness(bg).enhance(0.6)
-
-    iw, ih = img.size
-    scale = min(w / iw, h / ih)
-    fg = img.resize((max(1, int(round(iw * scale))), max(1, int(round(ih * scale)))), Image.LANCZOS)
-
-    bg.paste(fg, ((w - fg.size[0]) // 2, (h - fg.size[1]) // 2))
-
-    return bg
-
-
-def _panel(img: Image.Image, size: tuple[int, int]) -> Image.Image:
-    """Crop when the photo is close to the panel's shape (loses at most ~25%), otherwise keep it whole."""
-    target = size[0] / size[1]
-    actual = img.size[0] / img.size[1]
-
-    if 0.75 <= actual / target <= 1.33:
-        return _cover(img, size)
-
-    return _blur_fill(img, size)
 
 
 def _circle_mask(size: int) -> Image.Image:
@@ -145,38 +248,46 @@ def _paste_circle(canvas: Image.Image, img: Image.Image, xy: tuple[int, int], di
     canvas.paste(_cover(img, (diameter, diameter), 0.2), (x + ring, y + ring), _circle_mask(diameter))
 
 
-def compose(photos: list[Image.Image], layout: str = "auto") -> Image.Image:
-    """Build the Facebook image. No text is ever drawn."""
+def compose(photos: list[Image.Image], layout: str = "auto") -> tuple[Image.Image, int]:
+    """Build the Facebook image from approved photos. Returns (image, number_of_photos_used). Never draws text."""
     if not photos:
         raise ValueError("no photos to compose")
 
     layout = layout if layout in LAYOUTS else "auto"
+    first = photos[0]
 
-    if len(photos) == 1 or layout == "single":
-        return _panel(photos[0], CANVAS)
-
-    first, second = photos[0], photos[1]
-    width, height = CANVAS
+    if layout == "single" or len(photos) == 1:
+        return _natural(first), 1
 
     if layout == "inset":
-        canvas = _panel(first, CANVAS)
-        _paste_circle(canvas, second, (40, 40), 340)
-        return canvas
+        base = _natural(first)
+        diameter = int(min(base.size) * 0.36)
+        margin = int(min(base.size) * 0.04)
+        _paste_circle(base, photos[1], (margin, margin), diameter)
+        return base, 2
 
-    canvas = Image.new("RGB", CANVAS, (12, 14, 18))
-    both_portrait = all(p.size[0] / p.size[1] < 1.0 for p in (first, second))
+    partner = next((p for p in photos[1:] if _is_tall(p) == _is_tall(first)), None)
 
-    if both_portrait:
+    if partner is None:
+        return _natural(first), 1
+
+    if _is_tall(first):
+        width, height = CANVAS_SIDE
         left_w = (width - GAP) // 2
         right_w = width - GAP - left_w
 
-        canvas.paste(_panel(first, (left_w, height)), (0, 0))
-        canvas.paste(_panel(second, (right_w, height)), (left_w + GAP, 0))
-    else:
-        top_h = (height - GAP) // 2
-        bottom_h = height - GAP - top_h
+        canvas = Image.new("RGB", CANVAS_SIDE, BACKGROUND)
+        canvas.paste(_cover(first, (left_w, height)), (0, 0))
+        canvas.paste(_cover(partner, (right_w, height)), (left_w + GAP, 0))
 
-        canvas.paste(_panel(first, (width, top_h)), (0, 0))
-        canvas.paste(_panel(second, (width, bottom_h)), (0, top_h + GAP))
+        return canvas, 2
 
-    return canvas
+    width, height = CANVAS_STACK
+    top_h = (height - GAP) // 2
+    bottom_h = height - GAP - top_h
+
+    canvas = Image.new("RGB", CANVAS_STACK, BACKGROUND)
+    canvas.paste(_cover(first, (width, top_h)), (0, 0))
+    canvas.paste(_cover(partner, (width, bottom_h)), (0, top_h + GAP))
+
+    return canvas, 2
