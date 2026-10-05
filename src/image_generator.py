@@ -1,11 +1,12 @@
 """Replaceable image layer.
 
 IMAGE_MODE=faithful (default): re-render the SOURCE photo as a cinematic version of the same scene (article image).
-IMAGE_MODE=creative: reference-aware illustrations (old behaviour).
+IMAGE_MODE=creative: reference-aware editorial photojournalism.
 Stories with minors, or without a usable source image, always use the creative path.
 
 FACEBOOK_IMAGE_MODE=photo (default): the Facebook image is composed from the article's own photos
 (no AI, no filter, no text). If no photo passes screening, a natural realistic generated image is used.
+All generated images follow a strict photojournalism standard: raw press photograph, zero text, zero graphics, zero borders.
 """
 from __future__ import annotations
 
@@ -29,24 +30,25 @@ FACEBOOK_ASPECT = "1:1"    # used only by the generated (fallback) Facebook imag
 
 FAITHFUL = "faithful_restyle"
 
-# Facebook fallback: a plain realistic photograph, no cinematic grading.
-NEUTRAL_STYLE = (
-    "natural unedited realistic photograph, true-to-life colors, natural lighting, "
-    "no color grading, no filters, no film grain"
+# Neutral photojournalistic style for hyper-realistic viral storytelling photos
+REALISTIC_NEWS_STYLE = (
+    "authentic raw press photograph, shot on 35mm lens, natural ambient lighting, "
+    "editorial news photojournalism, realistic human skin textures, sharp focus, "
+    "unedited documentary photograph, real-life context, zero filters, zero CGI, zero illustration"
 )
 
+NEUTRAL_STYLE = REALISTIC_NEWS_STYLE
+
 NEGATIVE = (
-    "unrelated person, different animal, different vehicle, different building, "
-    "generic location, duplicate composition, copied source photograph, "
-    "distorted face, recognizable real person's face, extra limbs, "
-    "deformed anatomy, random text, captions, watermark, logo, "
-    "low quality, blurry subject, duplicate subject, invented factual details"
+    "illustration, vector, cartoon, 3d render, painting, graphic design, artwork, poster, "
+    "fake looking, CGI, digital art, stylized, smooth plastic skin, Photoshop edit, collage, "
+    "text, lettering, watermark, caption, logo, brand name, borders, frames, graphic overlays, arrows, "
+    "distorted face, extra limbs, deformed anatomy, blurry subject, ugly composition"
 )
 
 NEGATIVE_FAITHFUL = (
-    "cartoon, illustration, painting, anime, 3d render, extra people, missing people, "
-    "changed faces, changed clothing, different background, added objects, "
-    "random text, captions, watermark, logo, blurry, distorted anatomy"
+    "cartoon, illustration, painting, anime, 3d render, added graphic frames, borders, "
+    "changed faces, altered key subjects, random text, captions, watermark, logo, blurry"
 )
 
 
@@ -124,8 +126,8 @@ def choose_strategy(v: VisualAnalysis, has_ref: bool, people_style: str) -> tupl
     """
     Return (strategy, style) for the creative path.
 
-    - Real people are never recreated photorealistically.
-    - Reference identity is used only for identity-critical NON-HUMAN subjects.
+    - Real people are never recreated photorealistically without safe rules.
+    - Reference identity is used for identity-critical subjects.
     """
     subject_type = getattr(v, "subject_type", None) or "other"
 
@@ -135,7 +137,7 @@ def choose_strategy(v: VisualAnalysis, has_ref: bool, people_style: str) -> tupl
     def people_safe() -> tuple[str, str]:
         style = "faceless" if v.involves_minors else people_style
         if style == "reference":
-            style = "illustration"
+            style = REALISTIC_NEWS_STYLE
         return "people_safe", style
 
     if subject_type == "person":
@@ -143,28 +145,28 @@ def choose_strategy(v: VisualAnalysis, has_ref: bool, people_style: str) -> tupl
 
     if subject_type in {"multiple_subjects", "event", "scene"} and v.contains_real_people:
         if has_ref and v.reference_required and v.identity_critical:
-            return "reference_identity", "photorealistic"
+            return "reference_identity", REALISTIC_NEWS_STYLE
         return people_safe()
 
     if has_ref and v.reference_required:
-        return "reference_identity", "photorealistic"
+        return "reference_identity", REALISTIC_NEWS_STYLE
 
-    return "editorial", "editorial illustration"
+    return "editorial", REALISTIC_NEWS_STYLE
 
 
 def _faithful_prompt(style_text: str, aspect: str, simple: bool) -> str:
     parts = [
-        f"Aspect ratio {aspect}.",
+        f"Square 1:1 aspect ratio press photograph." if aspect == "1:1" else f"Aspect ratio {aspect}.",
         "The attached image is the SOURCE PHOTOGRAPH.",
-        "Re-render it as a faithful version of the SAME scene.",
+        "Re-render it as an authentic press news photograph of the EXACT same scene.",
         (
             "Keep exactly the same subjects, the same number of people, the same faces, expressions, poses, "
             "clothing, objects, setting, background layout and framing."
         ),
         "Do not add, remove, replace or invent any person, animal, object, text or detail.",
         f"Change only the visual treatment: {style_text}.",
-        "Photorealistic photograph look. Not a cartoon, not an illustration, not a painting.",
-        "No text, no captions, no watermark, no logo.",
+        "Authentic press news photograph look. Not a cartoon, not an illustration, not a painting, no graphics.",
+        "No text, no captions, no watermark, no logo, no artificial yellow/red graphic borders.",
     ]
 
     if not simple:
@@ -180,22 +182,44 @@ def build_prompt(
     scene_idea: str,
     title: str,
     aspect: str,
+    composition_type: str = "SINGLE_HERO",
     simple: bool = False,
 ) -> str:
-    """Provider-neutral image prompt."""
+    """Provider-neutral photographic press prompt with explicit structural layout handling."""
     if strategy == FAITHFUL:
         return _faithful_prompt(style, aspect, simple)
 
     base = [
-        f'Create ONE high-quality image for an article titled: "{title}".',
-        f"Aspect ratio {aspect}.",
-        "Strong visual hierarchy.",
-        "Clear main subject.",
-        "No text, no captions, no watermark, no logo.",
-        "Create a NEW composition rather than copying the source image.",
+        f"Square 1:1 authentic press news photograph for a story titled: '{title}'." if aspect == "1:1" else f"Aspect ratio {aspect} authentic press news photograph.",
+        "CAMERA & STYLE: Shot on 35mm DSLR camera, raw unedited press photojournalism, authentic natural lighting, real human textures, zero digital editing, zero CGI.",
+        "STRICT NO-GRAPHICS RULE: Absolutely NO text, NO watermarks, NO captions, NO logos, NO artificial graphic frames, NO borders, NO arrows, NO illustration style.",
     ]
 
-    scene = v.new_scene_direction or scene_idea or "a visually clear editorial scene related to the story"
+    comp = str(composition_type or "SINGLE_HERO").upper()
+
+    if "DIPTYCH" in comp or "SPLIT" in comp:
+        base.append(
+            "COMPOSITION LAYOUT: Seamless side-by-side split-screen press photograph. "
+            "Left side shows one key aspect of the story, right side shows the second related aspect. "
+            f"Scene description: {scene_idea}."
+        )
+    elif "DETAIL" in comp or "MAIN_PLUS" in comp:
+        base.append(
+            "COMPOSITION LAYOUT: Dynamic press photograph featuring a clear main subject in frame, "
+            "with a sharp focal point on a crucial secondary detail within the same real-life environment. "
+            f"Scene description: {scene_idea}."
+        )
+    elif "FOREGROUND" in comp:
+        base.append(
+            "COMPOSITION LAYOUT: News photograph with shallow depth of field. Main subject sharp in the foreground, "
+            "with contextual environment naturally visible in the background. "
+            f"Scene description: {scene_idea}."
+        )
+    else:  # SINGLE_HERO
+        base.append(
+            f"COMPOSITION LAYOUT: Single powerful focal point editorial press photo. Scene description: {scene_idea}."
+        )
+
     subject_type = getattr(v, "subject_type", None) or "other"
 
     if strategy == "reference_identity":
@@ -213,67 +237,45 @@ def build_prompt(
                 "Use the SAME specific non-human subject when the reference supports its identity. "
                 "Do not replace it with a generic animal, vehicle, building, place or object."
             ),
-            f"Create a NEW scene based on: {scene_idea}.",
-            f"Additional scene direction: {scene}.",
             "Change camera angle, composition, framing, lighting and/or moment. Do NOT copy the original photograph.",
-            "Do not create a similar-looking substitute subject. Preserve the specific subject's supported identity.",
-            "Do not invent factual details that are not supported by the story or visible reference.",
-            "Realistic cinematic photography look.",
+            "Realistic editorial photojournalistic photograph look.",
         ]
 
         if v.contains_real_people:
             base += [
-                "People may appear only as incidental contextual elements unless the story establishes them as the subject.",
-                "Do not identify, reconstruct or reproduce the face of any real person.",
+                "People may appear naturally as part of the press shot.",
+                "Keep human faces natural without unnatural AI distortion.",
             ]
 
     elif strategy == "people_safe":
-        if style == "faceless":
+        if style == "faceless" or v.involves_minors:
             base += [
-                f"Scene: {scene_idea}.",
                 (
-                    "Show people only from behind, in silhouette, in shadow, cropped without faces, "
-                    "or sufficiently far away that faces are not visible."
+                    "Show people naturally from candid angles, side profiles, rear views, cropped without direct full faces, "
+                    "or in medium shots where full facial reconstruction is not required."
                 ),
-                "No recognizable or reconstructed real person's face.",
-                "Focus on the place, objects, atmosphere and supported context of the story.",
-                (
-                    "Do not invent clothing, facial features, expressions, age appearance, "
-                    "ethnicity or other personal attributes."
-                ),
+                "Focus on the realistic situation, human actions, hands, environment, or surrounding objects.",
             ]
         else:
             base += [
-                "Stylised editorial DIGITAL ILLUSTRATION, clearly not a photograph.",
-                f"Scene: {scene_idea}.",
-                "Any people must be generic stylised figures with simplified non-identifying features.",
-                "They must NOT resemble any real individual.",
-                "Do not depict or reconstruct a real person's face.",
-                "Do not invent factual details about the people.",
+                "Depict everyday real people naturally in an authentic real-life environment.",
+                "Maintain raw photographic texture and natural camera lighting.",
             ]
 
         if v.scene_features:
-            base.append("Supported setting cues only: " + "; ".join(v.scene_features[:6]) + ".")
+            base.append("Supported setting cues: " + "; ".join(v.scene_features[:6]) + ".")
 
     else:
         base += [
-            f"Editorial illustration of: {scene_idea}.",
-            "The image is illustrative and must not claim to reproduce a real event exactly.",
+            f"Authentic news photograph of: {scene_idea}.",
             "Use only factual elements supported by the story.",
-            (
-                "Avoid inventing specific people, objects, locations, architecture, "
-                "clothing, weather, injuries or actions."
-            ),
         ]
 
     if v.involves_minors:
         base.append(
-            "If minors are present, do not show identifiable faces. "
+            "If minors are present, do not show direct identifiable faces. "
             "Use distant, rear-view, silhouette or non-identifying depiction."
         )
-
-    if v.contains_real_people:
-        base.append("Never guess or reconstruct facial identity from the reference.")
 
     if not simple:
         base.append("Avoid: " + NEGATIVE + ".")
@@ -297,7 +299,7 @@ def validate_image(
     except Exception:
         return False, "cannot open/corrupt", None
 
-    if min(img.size) < 512:
+    if min(img.size) < 400:
         return False, f"too small {img.size}", None
 
     stat = ImageStat.Stat(img.convert("L"))
@@ -347,12 +349,11 @@ def vlm_check(gem: GeminiClient, jpeg: bytes, title: str, summary: str) -> tuple
         r = gem.generate_json(
             (
                 f"Story: {title}\n{summary}\n\n"
-                "Evaluate ONLY the supplied image against the story.\n"
-                "Is the image relevant to the story?\n"
-                "Is it free of visible text, watermarks and logos?\n"
-                "Does it have obvious visual defects such as deformed hands, faces, "
-                "anatomy or severe rendering artifacts?\n"
-                "Do not reject an image merely because it is an illustration."
+                "Evaluate ONLY the supplied image against the story for news publishing:\n"
+                "1. Is the image relevant to the story?\n"
+                "2. Is it COMPLETELY FREE of visible text, captions, watermarks, logos, or artificial graphic overlays/borders?\n"
+                "3. Does it look like a realistic photograph (not an obvious cartoon, 3D render, artwork, or illustration)?\n"
+                "4. Is it free of obvious visual defects such as deformed hands, extra limbs, or severe rendering artifacts?"
             ),
             ImageCheckSchema,
             images=[(jpeg, "image/jpeg")],
@@ -511,6 +512,7 @@ class ImageGenerator:
         source_ahash: str,
         out_path: Path,
         summary: str,
+        composition_type: str = "SINGLE_HERO",
         forbid_text: bool = False,
     ) -> tuple[str, str, str]:
         """
@@ -532,16 +534,18 @@ class ImageGenerator:
 
         for i, (simple, r) in enumerate(plans[:max_attempts], 1):
             if strategy == "reference_identity" and r is None:
-                strat, sty = "editorial", "editorial illustration"
+                strat, sty = "editorial", REALISTIC_NEWS_STYLE
             else:
                 strat, sty = strategy, style
 
-            prompt = build_prompt(strat, sty, v, scene_idea, title, aspect, simple=simple)
+            prompt = build_prompt(
+                strat, sty, v, scene_idea, title, aspect, composition_type=composition_type, simple=simple
+            )
 
             try:
                 logger.log(
                     "IMAGE",
-                    f"{kind}: generating ({strat}, attempt {i}/{max_attempts}, ref={'yes' if r else 'no'})",
+                    f"{kind}: generating ({strat}, layout={composition_type}, attempt {i}/{max_attempts}, ref={'yes' if r else 'no'})",
                 )
                 data, _mime = self.provider.generate(prompt, [r] if r else None, aspect)
 
@@ -609,6 +613,7 @@ class ImageGenerator:
         title: str,
         article_scene: str,
         facebook_scene: str,
+        facebook_composition_type: str = "SINGLE_HERO",
         source_ref: tuple[bytes, str] | None,
         source_url: str,
         source_sha: str,
@@ -664,6 +669,7 @@ class ImageGenerator:
             source_ahash=check_ahash,
             out_path=out,
             summary=summary,
+            composition_type="SINGLE_HERO",
         )
 
         res = ImageResult(
@@ -693,7 +699,7 @@ class ImageGenerator:
             res.facebook_image_hash, res.facebook_image_ahash = photo
 
         elif self.cfg.facebook_separate_image:
-            fb_style = NEUTRAL_STYLE if faithful else style
+            fb_style = REALISTIC_NEWS_STYLE if faithful else style
 
             try:
                 fb_sha, fb_ah, _ = self._one(
@@ -710,6 +716,7 @@ class ImageGenerator:
                     source_ahash=check_ahash,
                     out_path=fb_out,
                     summary=summary,
+                    composition_type=facebook_composition_type,
                     forbid_text=True,
                 )
 
