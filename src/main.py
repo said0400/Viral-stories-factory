@@ -407,6 +407,7 @@ class Factory:
                     title=content.blogger_title,
                     article_scene=content.article_scene_idea,
                     facebook_scene=content.facebook_scene_idea,
+                    facebook_composition_type=content.facebook_composition_type,
                     source_ref=(ref[0], ref[1]) if ref else None,
                     source_url=ref[2] if ref else "",
                     source_sha=ref[3] if ref else "",
