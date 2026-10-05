@@ -169,18 +169,17 @@ Examples:
 
 Do not add unrelated SEO labels.
 
-11. facebook_composition_type MUST be strictly one of these 4 photojournalism layouts based on the story:
-- "DIPTYCH_SPLIT": Use when comparing two people, before/after, two places, or two related perspectives side-by-side.
-- "MAIN_PLUS_DETAIL": Use when the story relies on a main subject PLUS a specific close-up item/detail (e.g., face + bandaged finger, car + towing detail).
-- "FOREGROUND_BACKGROUND": Use when showing an action or main subject sharp in the foreground with essential context in the background.
-- "SINGLE_HERO": Use when one dramatic subject or place carries the whole narrative.
+11. facebook_composition_type MUST be strictly one of these layouts:
+- "INSET_CIRCLE": Main subject fills 1:1 canvas, and a secondary close-up detail/explanatory image is placed in a circular inset on the top right. (PREFERRED for stories with a key detail like an injury, object, car part, etc.).
+- "INSET_SQUARE": Main subject fills 1:1 canvas, and a secondary image is placed in a small square inset on top right.
+- "SINGLE_HERO": Single powerful subject carrying the whole narrative when no secondary detail is needed.
 
-12. article_scene_idea / facebook_scene_idea:
-Write in English (1-3 concise sentences).
-Describe a realistic EDITORIAL PRESS PHOTOGRAPH that reflects the story according to the chosen facebook_composition_type.
+12. facebook_scene_idea & facebook_detail_scene_idea:
+- facebook_scene_idea: Describe the MAIN visual press photograph for the story (e.g. "A young woman sitting on a hospital bed looking at the camera").
+- facebook_detail_scene_idea: Describe the SECONDARY close-up detail or explanatory element (e.g. "Extreme close-up press photograph of a heavily bandaged index finger"). Leave empty ONLY if composition_type is "SINGLE_HERO".
 
 STRICT VISUAL RULES:
-- MUST look like an authentic, raw, unedited press news photograph taken on a real camera.
+- MUST look like authentic, raw, unedited press news photographs taken on a real camera.
 - NEVER request illustrations, 3D renders, drawings, artwork, posters, or cartoons.
 - STRICTLY FORBIDDEN: Any embedded text, headlines, subtitles, watermarks, logos, graphic frames, yellow/red borders, or arrows.
 - Use ONLY factual elements supported by the source text.
@@ -225,7 +224,7 @@ No keyword stuffing.
 Do not add facts that are not supported by the source.
 
 20. FINAL CONSISTENCY:
-blogger_title, facebook_title, facebook_post, first_comment_hook, article_scene_idea and facebook_scene_idea must all remain consistent with the same source facts.
+blogger_title, facebook_title, facebook_post, first_comment_hook, article_scene_idea, facebook_scene_idea and facebook_detail_scene_idea must all remain consistent with the same source facts.
 Do not introduce a new factual claim in one field that is absent from the article/source."""
 
 FACT_SYSTEM = """You are a strict fact checker.
@@ -606,10 +605,13 @@ def generate_content(
     data["first_comment_hook"] = _strip_urls(data["first_comment_hook"])
     data["seo_description"] = str(data["seo_description"] or "").strip()[:155].rstrip()
 
-    comp_type = str(data.get("facebook_composition_type", "SINGLE_HERO")).strip().upper()
-    if comp_type not in {"DIPTYCH_SPLIT", "MAIN_PLUS_DETAIL", "FOREGROUND_BACKGROUND", "SINGLE_HERO"}:
-        comp_type = "SINGLE_HERO"
+    comp_type = str(data.get("facebook_composition_type", "INSET_CIRCLE")).strip().upper()
+    if comp_type not in {"INSET_CIRCLE", "INSET_SQUARE", "SINGLE_HERO"}:
+        comp_type = "INSET_CIRCLE"
     data["facebook_composition_type"] = comp_type
+
+    data["facebook_scene_idea"] = _strip_urls(data.get("facebook_scene_idea", ""))
+    data["facebook_detail_scene_idea"] = _strip_urls(data.get("facebook_detail_scene_idea", ""))
 
     labels: list[str] = []
 
@@ -640,6 +642,7 @@ def fact_check(
         f"FIRST COMMENT:\n{content.first_comment_hook}\n\n"
         f"ARTICLE SCENE IDEA:\n{content.article_scene_idea}\n\n"
         f"FACEBOOK SCENE IDEA:\n{content.facebook_scene_idea}\n\n"
+        f"FACEBOOK DETAIL SCENE IDEA:\n{content.facebook_detail_scene_idea}\n\n"
         f"FACEBOOK COMPOSITION TYPE:\n{content.facebook_composition_type}\n\n"
         "Check every factual claim against SOURCE TEXT."
     )
