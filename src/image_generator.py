@@ -1,11 +1,11 @@
 """Replaceable image layer.
 
-IMAGE_MODE=faithful (default): re-render the SOURCE photo as a cinematic version of the same scene.
+IMAGE_MODE=faithful (default): re-render the SOURCE photo as a cinematic version of the same scene (article image).
 IMAGE_MODE=creative: reference-aware illustrations (old behaviour).
 Stories with minors, or without a usable source image, always use the creative path.
 
 FACEBOOK_IMAGE_MODE=photo (default): the Facebook image is composed from the article's own photos
-(no AI, no text). Stories involving minors fall back to a generated image.
+(no AI, no filter, no text). If no photo passes screening, a natural realistic generated image is used.
 """
 from __future__ import annotations
 
@@ -20,14 +20,20 @@ from .cloudflare_client import CloudflareClient
 from .config import Settings
 from .gemini_client import GeminiClient, GeminiError, ImageGenError, ImageQuotaError
 from .models import ImageCheckSchema, ImageResult, SourceArticle, VisualAnalysis
-from .photo_composer import compose, fetch_photos
+from .photo_composer import compose, fetch_photos, screen_photos
 from .utils import PoliteFetcher, sha256_hex
 from .visual_analyzer import ahash, hamming
 
 ARTICLE_ASPECT = "16:9"
-FACEBOOK_ASPECT = "1:1"    # used only by the generated (non-photo) Facebook image
+FACEBOOK_ASPECT = "1:1"    # used only by the generated (fallback) Facebook image
 
 FAITHFUL = "faithful_restyle"
+
+# Facebook fallback: a plain realistic photograph, no cinematic grading.
+NEUTRAL_STYLE = (
+    "natural unedited realistic photograph, true-to-life colors, natural lighting, "
+    "no color grading, no filters, no film grain"
+)
 
 NEGATIVE = (
     "unrelated person, different animal, different vehicle, different building, "
@@ -150,7 +156,7 @@ def _faithful_prompt(style_text: str, aspect: str, simple: bool) -> str:
     parts = [
         f"Aspect ratio {aspect}.",
         "The attached image is the SOURCE PHOTOGRAPH.",
-        "Re-render it as a faithful cinematic version of the SAME scene.",
+        "Re-render it as a faithful version of the SAME scene.",
         (
             "Keep exactly the same subjects, the same number of people, the same faces, expressions, poses, "
             "clothing, objects, setting, background layout and framing."
@@ -369,21 +375,29 @@ def fidelity_check(
     gem: GeminiClient,
     source: tuple[bytes, str],
     result_jpeg: bytes,
+    forbid_text: bool = False,
 ) -> tuple[bool, str]:
     """Faithful-path quality gate: is the result a faithful restyle of the SOURCE photo? Fail-open.
 
-    Only `relevant_to_story` and `obvious_defects` decide. The text field is ignored here: the source
-    itself may contain text, and a faithful restyle then legitimately contains it too.
+    relevant_to_story and obvious_defects always decide. The text field decides only when
+    `forbid_text` is set (Facebook), because the article source itself may legitimately contain text.
     """
+    text_rule = (
+        "contains_text_or_watermark = true if Image 2 shows ANY visible text, letters, captions, "
+        "subtitles, watermark or logo anywhere in it."
+        if forbid_text
+        else "contains_text_or_watermark: not used, answer false."
+    )
+
     try:
         r = gem.generate_json(
             (
-                "Image 1 is the SOURCE photograph. Image 2 is a cinematic restyled version of it.\n"
+                "Image 1 is the SOURCE photograph. Image 2 is a restyled version of it.\n"
                 "Judge ONLY whether Image 2 is a faithful restyle of Image 1.\n"
                 "relevant_to_story = true when Image 2 shows the same scene as Image 1: the same kind of "
                 "subjects, the same number of people, the same setting and a similar composition. "
-                "A different colour grade, lighting or mood is expected and fine.\n"
-                "contains_text_or_watermark: not used, answer false.\n"
+                "A different colour grade or lighting is fine.\n"
+                f"{text_rule}\n"
                 "obvious_defects = true only for clearly deformed faces, hands or anatomy, "
                 "or severe rendering artifacts.\n"
                 "Keep reason to one short sentence."
@@ -395,6 +409,9 @@ def fidelity_check(
         )
 
         ok = r.relevant_to_story and not r.obvious_defects
+
+        if forbid_text and r.contains_text_or_watermark:
+            ok = False
 
         return ok, r.reason
 
@@ -439,7 +456,7 @@ class ImageGenerator:
             pass
 
     def _facebook_photo(self, article: SourceArticle, v: VisualAnalysis, out_path: Path) -> tuple[str, str] | None:
-        """Facebook image from the article's own photos. Returns (sha, ahash) or None to use the generated path."""
+        """Facebook image from the article's own screened photos. Returns (sha, ahash) or None to use the fallback."""
         if self.cfg.facebook_image_mode != "photo":
             return None
 
@@ -452,16 +469,26 @@ class ImageGenerator:
             return None
 
         try:
-            photos = fetch_photos(article, self.fetcher, limit=2)
+            candidates = fetch_photos(article, self.fetcher)
 
-            if not photos:
+            if not candidates:
                 logger.warn("IMAGE", "facebook photo mode: no usable source photo; using generated image")
                 return None
 
-            canvas = compose(photos, self.cfg.facebook_layout)
+            clean = screen_photos(self.gem, candidates)
+
+            if not clean:
+                logger.warn(
+                    "IMAGE",
+                    f"facebook photo mode: none of {len(candidates)} photo(s) passed screening "
+                    "(text/logo, minors, collage); using generated image",
+                )
+                return None
+
+            canvas, used = compose([candidates[i] for i in clean], self.cfg.facebook_layout)
             sha, ah = _save_jpeg(canvas, out_path)
 
-            logger.log("IMAGE", f"facebook: photo layout built from {len(photos)} source photo(s)")
+            logger.log("IMAGE", f"facebook: real-photo layout built from {used} of {len(clean)} approved photo(s)")
 
             return sha, ah
 
@@ -484,6 +511,7 @@ class ImageGenerator:
         source_ahash: str,
         out_path: Path,
         summary: str,
+        forbid_text: bool = False,
     ) -> tuple[str, str, str]:
         """
         Bounded attempts (cost control).
@@ -543,7 +571,7 @@ class ImageGenerator:
                     payload = out_path.read_bytes()
 
                     if strat == FAITHFUL and r is not None:
-                        good, reason = fidelity_check(self.gem, r, payload)
+                        good, reason = fidelity_check(self.gem, r, payload, forbid_text)
                     else:
                         good, reason = vlm_check(self.gem, payload, title, summary)
 
@@ -665,11 +693,13 @@ class ImageGenerator:
             res.facebook_image_hash, res.facebook_image_ahash = photo
 
         elif self.cfg.facebook_separate_image:
+            fb_style = NEUTRAL_STYLE if faithful else style
+
             try:
                 fb_sha, fb_ah, _ = self._one(
                     kind="facebook",
                     strategy=strategy,
-                    style=style,
+                    style=fb_style,
                     v=v,
                     scene_idea=facebook_scene,
                     title=title,
@@ -680,6 +710,7 @@ class ImageGenerator:
                     source_ahash=check_ahash,
                     out_path=fb_out,
                     summary=summary,
+                    forbid_text=True,
                 )
 
                 res.facebook_path = str(fb_out)
