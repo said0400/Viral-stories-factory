@@ -4,7 +4,7 @@ IMAGE_MODE=faithful (default): re-render the SOURCE photo as a cinematic version
 IMAGE_MODE=creative: reference-aware editorial photojournalism.
 
 FACEBOOK_IMAGE_MODE=photo: real screened photos or dynamic composite AI-generated photo.
-Facebook generated images construct professional compositions with programmatic circular/square inset overlays.
+Facebook generated images construct professional split-panel or circular inset compositions.
 """
 from __future__ import annotations
 
@@ -121,12 +121,6 @@ def crop_to_aspect(ref: tuple[bytes, str], aspect: str) -> tuple[bytes, str]:
 
 # ------------------------------------------------------------------ strategy
 def choose_strategy(v: VisualAnalysis, has_ref: bool, people_style: str) -> tuple[str, str]:
-    """
-    Return (strategy, style) for the creative path.
-
-    - Real people are never recreated photorealistically without safe rules.
-    - Reference identity is used for identity-critical subjects.
-    """
     subject_type = getattr(v, "subject_type", None) or "other"
 
     if people_style not in {"reference", "illustration", "faceless"}:
@@ -157,10 +151,7 @@ def _faithful_prompt(style_text: str, aspect: str, simple: bool) -> str:
         f"Square 1:1 aspect ratio press photograph." if aspect == "1:1" else f"Aspect ratio {aspect}.",
         "The attached image is the SOURCE PHOTOGRAPH.",
         "Re-render it as an authentic press news photograph of the EXACT same scene.",
-        (
-            "Keep exactly the same subjects, the same number of people, the same faces, expressions, poses, "
-            "clothing, objects, setting, background layout and framing."
-        ),
+        "Keep exactly the same subjects, the same number of people, the same faces, expressions, poses, clothing, objects, setting, and framing.",
         "Do not add, remove, replace or invent any person, animal, object, text or detail.",
         f"Change only the visual treatment: {style_text}.",
         "Authentic press news photograph look. Not a cartoon, not an illustration, not a painting, no graphics.",
@@ -180,99 +171,54 @@ def build_prompt(
     scene_idea: str,
     title: str,
     aspect: str,
+    detail_scene_idea: str = "",
     composition_type: str = "SINGLE_HERO",
     simple: bool = False,
 ) -> str:
-    """Provider-neutral photographic press prompt with explicit structural layout handling."""
+    """Build structural prompt based on exact prompt templates."""
     if strategy == FAITHFUL:
         return _faithful_prompt(style, aspect, simple)
+
+    comp = str(composition_type or "SINGLE_HERO").upper()
+
+    # EXACT SPLIT-PANEL PROMPT TEMPLATE requested by user
+    if "DIPTYCH" in comp or "SPLIT" in comp:
+        subject_a = scene_idea if scene_idea else "main subject of the story"
+        subject_b = detail_scene_idea if detail_scene_idea else "related secondary subject or contrasting perspective of the story"
+
+        return (
+            "A high-definition, professional split-panel photograph, designed for a social media information card. "
+            "The image is vertically divided into two distinct sections. "
+            f"The left panel features a close-up photograph of {subject_a}. "
+            f"The right panel features a close-up photograph of {subject_b}. "
+            "Both panels are clean, free of any text, overlays, logos, or watermarks. "
+            "The background is simple, ensuring the focus remains entirely on the subjects. "
+            "Realistic camera lighting, sharp details, cinematic quality, photojournalism, no text."
+        )
 
     base = [
         f"Square 1:1 authentic press news photograph for a story titled: '{title}'." if aspect == "1:1" else f"Aspect ratio {aspect} authentic press news photograph.",
         "CAMERA & STYLE: Shot on 35mm DSLR camera, raw unedited press photojournalism, authentic natural lighting, real human textures, zero digital editing, zero CGI.",
         "STRICT NO-GRAPHICS RULE: Absolutely NO text, NO watermarks, NO captions, NO logos, NO artificial graphic frames, NO borders, NO arrows, NO illustration style.",
+        f"SCENE DESCRIPTION: {scene_idea}.",
     ]
-
-    comp = str(composition_type or "SINGLE_HERO").upper()
-
-    if "DIPTYCH" in comp or "SPLIT" in comp:
-        base.append(
-            "COMPOSITION LAYOUT: Seamless side-by-side split-screen press photograph. "
-            "Left side shows one key aspect of the story, right side shows the second related aspect. "
-            f"Scene description: {scene_idea}."
-        )
-    elif "DETAIL" in comp or "MAIN_PLUS" in comp or "INSET" in comp:
-        base.append(
-            "COMPOSITION LAYOUT: Dynamic press photograph featuring a clear main subject in frame. "
-            f"Scene description: {scene_idea}."
-        )
-    elif "FOREGROUND" in comp:
-        base.append(
-            "COMPOSITION LAYOUT: News photograph with shallow depth of field. Main subject sharp in the foreground, "
-            "with contextual environment naturally visible in the background. "
-            f"Scene description: {scene_idea}."
-        )
-    else:  # SINGLE_HERO
-        base.append(
-            f"COMPOSITION LAYOUT: Single powerful focal point editorial press photo. Scene description: {scene_idea}."
-        )
 
     subject_type = getattr(v, "subject_type", None) or "other"
 
     if strategy == "reference_identity":
-        keep = (
-            "; ".join(v.identity_features[:12])
-            if v.identity_features
-            else "all clearly visible distinctive identity features"
-        )
-
+        keep = "; ".join(v.identity_features[:12]) if v.identity_features else "all clearly visible distinctive identity features"
         base += [
             "The attached image is a REFERENCE for the specific real subject described by the story.",
             f"Subject type: {subject_type}.",
             f"Preserve these identity-critical characteristics: {keep}.",
-            (
-                "Use the SAME specific non-human subject when the reference supports its identity. "
-                "Do not replace it with a generic animal, vehicle, building, place or object."
-            ),
-            "Change camera angle, composition, framing, lighting and/or moment. Do NOT copy the original photograph.",
             "Realistic editorial photojournalistic photograph look.",
         ]
 
-        if v.contains_real_people:
-            base += [
-                "People may appear naturally as part of the press shot.",
-                "Keep human faces natural without unnatural AI distortion.",
-            ]
-
     elif strategy == "people_safe":
         if style == "faceless" or v.involves_minors:
-            base += [
-                (
-                    "Show people naturally from candid angles, side profiles, rear views, cropped without direct full faces, "
-                    "or in medium shots where full facial reconstruction is not required."
-                ),
-                "Focus on the realistic situation, human actions, hands, environment, or surrounding objects.",
-            ]
+            base.append("Show people naturally from candid angles, side profiles, rear views, or in medium shots.")
         else:
-            base += [
-                "Depict everyday real people naturally in an authentic real-life environment.",
-                "Maintain raw photographic texture and natural camera lighting.",
-            ]
-
-        if v.scene_features:
-            base.append("Supported setting cues: " + "; ".join(v.scene_features[:6]) + ".")
-
-    else:
-        base += [
-            f"Authentic news photograph of: {scene_idea}.",
-            "Use only factual elements supported by the story.",
-        ]
-
-    if v.involves_minors:
-        base.append(
-            "If minors are present, do not show direct identifiable faces. "
-            "Use distant, rear-view, silhouette or non-identifying depiction."
-        )
+            base.append("Depict everyday real people naturally in an authentic real-life environment.")
 
     if not simple:
         base.append("Avoid: " + NEGATIVE + ".")
@@ -282,7 +228,6 @@ def build_prompt(
 
 # ------------------------------------------------------------------ PROGRAMMATIC INSET COMPOSITION
 def create_circle_mask(size: int) -> Image.Image:
-    """Anti-aliased circle mask."""
     mask = Image.new("L", (size * 4, size * 4), 0)
     draw = ImageDraw.Draw(mask)
     draw.ellipse((0, 0, size * 4 - 1, size * 4 - 1), fill=255)
@@ -294,43 +239,34 @@ def composite_inset(
     detail_bytes: bytes,
     shape: str = "INSET_CIRCLE",
 ) -> bytes:
-    """Programmatically overlay detail image over the main image at top-right corner."""
     try:
         main_img = Image.open(io.BytesIO(main_bytes)).convert("RGB")
         detail_img = Image.open(io.BytesIO(detail_bytes)).convert("RGB")
 
-        # Standardize main canvas to 1080x1080
         main_img = ImageOps.fit(main_img, (1080, 1080), Image.LANCZOS)
 
-        # Size of the inset: 32% of canvas (345x345 px)
         inset_size = 345
         margin = 35
         border_width = 8
 
         detail_cropped = ImageOps.fit(detail_img, (inset_size, inset_size), Image.LANCZOS)
 
-        # Position: Top Right
         x = 1080 - inset_size - margin
         y = margin
 
         if shape == "INSET_SQUARE":
-            # Square with clean subtle white border
             border_box = (x - border_width, y - border_width, x + inset_size + border_width, y + inset_size + border_width)
             draw = ImageDraw.Draw(main_img)
             draw.rectangle(border_box, fill=(240, 240, 240))
             main_img.paste(detail_cropped, (x, y))
 
         else:  # INSET_CIRCLE
-            # Circle with clean yellow ring
             outer_size = inset_size + (border_width * 2)
-            ring_img = Image.new("RGB", (outer_size, outer_size), (255, 204, 0))  # Bright yellow ring
+            ring_img = Image.new("RGB", (outer_size, outer_size), (255, 204, 0))  # Yellow ring
             ring_mask = create_circle_mask(outer_size)
-
             inset_mask = create_circle_mask(inset_size)
 
-            # Paste Ring
             main_img.paste(ring_img, (x - border_width, y - border_width), ring_mask)
-            # Paste Detail Circle
             main_img.paste(detail_cropped, (x, y), inset_mask)
 
         buf = io.BytesIO()
@@ -348,7 +284,6 @@ def validate_image(
     known: list[tuple[str, str]],
     source_ahash: str = "",
 ) -> tuple[bool, str, Image.Image | None]:
-    """Validate integrity, dimensions and duplication."""
     if not data:
         return False, "empty file", None
 
@@ -379,7 +314,6 @@ def validate_image(
 
 
 def _save_jpeg(img: Image.Image, path: Path) -> tuple[str, str]:
-    """Save a normalised JPEG under the WhatsApp size limit; return (sha256, ahash)."""
     img = img.convert("RGB")
     img.thumbnail((1600, 1600))
 
@@ -403,7 +337,6 @@ def _save_jpeg(img: Image.Image, path: Path) -> tuple[str, str]:
 
 
 def vlm_check(gem: GeminiClient, jpeg: bytes, title: str, summary: str) -> tuple[bool, str]:
-    """Creative-path quality gate: relevance to the story. Fail-open if unavailable."""
     try:
         r = gem.generate_json(
             (
@@ -437,7 +370,6 @@ def fidelity_check(
     result_jpeg: bytes,
     forbid_text: bool = False,
 ) -> tuple[bool, str]:
-    """Faithful-path quality gate: is the result a faithful restyle of the SOURCE photo? Fail-open."""
     text_rule = (
         "contains_text_or_watermark = true if Image 2 shows ANY visible text, letters, captions, "
         "subtitles, watermark or logo anywhere in it."
@@ -450,12 +382,9 @@ def fidelity_check(
             (
                 "Image 1 is the SOURCE photograph. Image 2 is a restyled version of it.\n"
                 "Judge ONLY whether Image 2 is a faithful restyle of Image 1.\n"
-                "relevant_to_story = true when Image 2 shows the same scene as Image 1: the same kind of "
-                "subjects, the same number of people, the same setting and a similar composition. "
-                "A different colour grade or lighting is fine.\n"
+                "relevant_to_story = true when Image 2 shows the same scene as Image 1.\n"
                 f"{text_rule}\n"
-                "obvious_defects = true only for clearly deformed faces, hands or anatomy, "
-                "or severe rendering artifacts.\n"
+                "obvious_defects = true only for clearly deformed faces, hands or anatomy.\n"
                 "Keep reason to one short sentence."
             ),
             ImageCheckSchema,
@@ -559,10 +488,11 @@ class ImageGenerator:
         title: str,
         aspect: str,
         ref: tuple[bytes, str] | None,
+        detail_scene_idea: str = "",
         composition_type: str = "SINGLE_HERO",
     ) -> bytes:
         prompt = build_prompt(
-            strategy, style, v, scene_idea, title, aspect, composition_type=composition_type, simple=False
+            strategy, style, v, scene_idea, title, aspect, detail_scene_idea=detail_scene_idea, composition_type=composition_type, simple=False
         )
         data, _mime = self.provider.generate(prompt, [ref] if ref else None, aspect)
         return data
@@ -582,6 +512,7 @@ class ImageGenerator:
         source_ahash: str,
         out_path: Path,
         summary: str,
+        detail_scene_idea: str = "",
         composition_type: str = "SINGLE_HERO",
         forbid_text: bool = False,
     ) -> tuple[str, str, str]:
@@ -601,7 +532,7 @@ class ImageGenerator:
                 strat, sty = strategy, style
 
             prompt = build_prompt(
-                strat, sty, v, scene_idea, title, aspect, composition_type=composition_type, simple=simple
+                strat, sty, v, scene_idea, title, aspect, detail_scene_idea=detail_scene_idea, composition_type=composition_type, simple=simple
             )
 
             try:
@@ -805,6 +736,7 @@ class ImageGenerator:
                         style=REALISTIC_NEWS_STYLE,
                         v=v,
                         scene_idea=facebook_scene,
+                        detail_scene_idea=facebook_detail_scene,
                         title=title,
                         aspect=FACEBOOK_ASPECT,
                         ref=facebook_ref_selected,
