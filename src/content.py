@@ -170,26 +170,23 @@ Examples:
 Do not add unrelated SEO labels.
 
 11. facebook_composition_type MUST be strictly one of these layouts:
-- "INSET_CIRCLE": Main subject fills 1:1 canvas, and a secondary close-up detail/explanatory image is placed in a circular inset on the top right. (PREFERRED for stories with a key detail like an injury, object, car part, etc.).
-- "INSET_SQUARE": Main subject fills 1:1 canvas, and a secondary image is placed in a small square inset on top right.
-- "SINGLE_HERO": Single powerful subject carrying the whole narrative when no secondary detail is needed.
+- "DIPTYCH_SPLIT": Use when comparing two people, two states (before/after), or two perspectives side-by-side (e.g. A doctor in uniform vs same doctor at a food stall).
+- "INSET_CIRCLE": Main subject fills 1:1 canvas, and a secondary close-up detail/explanatory image is placed in a circular inset on the top right.
+- "SINGLE_HERO": Single powerful subject carrying the whole narrative.
 
 12. facebook_scene_idea & facebook_detail_scene_idea:
-- facebook_scene_idea: Describe the MAIN visual press photograph for the story (e.g. "A young woman sitting on a hospital bed looking at the camera").
-- facebook_detail_scene_idea: Describe the SECONDARY close-up detail or explanatory element (e.g. "Extreme close-up press photograph of a heavily bandaged index finger"). Leave empty ONLY if composition_type is "SINGLE_HERO".
+- facebook_scene_idea: Subject A / Left Panel (e.g. "close-up portrait of a Chinese female doctor wearing a lab coat").
+- facebook_detail_scene_idea: Subject B / Right Panel (e.g. "close-up portrait of the same woman smiling while making food in a street stall").
 
 STRICT VISUAL RULES:
 - MUST look like authentic, raw, unedited press news photographs taken on a real camera.
 - NEVER request illustrations, 3D renders, drawings, artwork, posters, or cartoons.
 - STRICTLY FORBIDDEN: Any embedded text, headlines, subtitles, watermarks, logos, graphic frames, yellow/red borders, or arrows.
 - Use ONLY factual elements supported by the source text.
-- Avoid invented locations, objects, people, clothing, weather, or actions not supported by the story.
-- Do not describe or guess the exact face of any real identifiable person.
 
 13. REAL PEOPLE:
 When real people are part of the story, describe only factual/contextual information supported by the source.
 Never invent facial features, expressions, age appearance, ethnicity, identity or other sensitive characteristics.
-The image generation system may use a supplied reference image where permitted, but the editorial text itself must never claim that an exact identity or likeness has been established.
 
 14. MINORS:
 If minors are part of the story, do not request identifiable facial depictions.
@@ -197,83 +194,27 @@ Prefer a non-identifying, indirect or contextual visual treatment.
 
 15. SOURCE IMAGE:
 A source image is a reference for the story and subject only.
-It must NOT be treated as a request to reproduce the original image exactly.
-
-When suggesting a new visual:
-- preserve supported identity-critical subject characteristics when appropriate
-- change composition, framing, camera angle, lighting or moment
-- do not invent new factual events
-- do not turn an illustrative scene into a claim that the event happened exactly that way
 
 16. NON-HUMAN SUBJECTS:
-For animals, vehicles, buildings, places, objects and other specific non-human subjects, preserve important identifying characteristics supported by the source or reference image.
-Do not invent markings, colors, damage, architecture, model numbers or other identity-critical details.
+For animals, vehicles, buildings, places, objects, preserve important identifying characteristics supported by the source or reference image.
 
 17. UNCERTAINTY:
 If the source does not establish a detail, omit it or clearly mark it as uncertain.
-Never use a plausible assumption as a factual detail.
 
 18. FACTUAL PRIORITY:
 Accuracy is more important than drama.
-If a dramatic visual or sentence would require inventing a fact, do not use it.
 
 19. SEO:
 seo_description must be <= 155 characters in Arabic.
-Keep it natural.
-No keyword stuffing.
-Do not add facts that are not supported by the source.
 
 20. FINAL CONSISTENCY:
-blogger_title, facebook_title, facebook_post, first_comment_hook, article_scene_idea, facebook_scene_idea and facebook_detail_scene_idea must all remain consistent with the same source facts.
-Do not introduce a new factual claim in one field that is absent from the article/source."""
+All fields must remain consistent with the same source facts."""
 
 FACT_SYSTEM = """You are a strict fact checker.
 
 Compare the ARTICLE, SEO DESCRIPTION, and FACEBOOK POST against the SOURCE TEXT.
 
 List every concrete claim that is NOT supported by the source.
-
-Concrete claims include:
-- names
-- ages
-- dates
-- locations
-- numbers
-- quotes
-- causes
-- motives
-- outcomes
-- relationships
-- medical claims
-- statements about what a real person thought, felt, intended or knew
-- claims about what happened
-- claims about specific objects, animals, vehicles, buildings or places
-
-Paraphrase and translation are fine.
-Reasonable wording differences are NOT factual errors.
-
-Do NOT flag:
-- harmless stylistic wording
-- natural Arabic transitions
-- clearly marked uncertainty
-- statements that accurately summarize the source
-- obvious grammatical reformulations
-
-A claim is unsupported when the SOURCE TEXT does not establish it.
-
-Pay special attention to claims that:
-- add a new fact
-- change a number
-- change a date
-- change a location
-- change who did something
-- change the cause of an event
-- change the outcome
-- turn uncertainty into certainty
-- attribute a thought, emotion, motive or intention to a real person
-
-Also check the visual scene ideas for factual additions.
-If an image idea describes a specific factual element not supported by the source, include it as an unsupported claim.
 
 Return only claims that genuinely require correction.
 If everything is supported, return an empty unsupported_claims list and all_claims_supported=true."""
@@ -338,7 +279,6 @@ def _strip_urls(text: str) -> str:
 
 
 def _safe_story_id(story_id: str) -> str:
-    """Same `story_id:<id>` convention is used by history.py and blogger.py."""
     value = str(story_id or "").strip()
 
     if not value:
@@ -386,7 +326,6 @@ def _safe_source_url(source_url: str) -> str:
 
 
 def _safe_image_src(value: str) -> str:
-    """Accept https/http URLs, inline JPEG/PNG data URIs, and the exporter's relative path."""
     src = str(value or "").strip()
 
     if not src:
@@ -415,7 +354,6 @@ def render_blogger_html(
     image_url: str,
     story_id: str,
 ) -> str:
-    """Final Blogger HTML: image + sanitised body + attribution + hidden idempotency marker."""
     safe_story_id = _safe_story_id(story_id)
     body = sanitize_html(content.blogger_html)
 
@@ -457,7 +395,6 @@ def render_blogger_html(
     )
 
 
-# ---------------------------------------------------------------- triage
 def triage(
     gem: GeminiClient,
     candidates: list[SourceArticle],
@@ -477,17 +414,10 @@ def triage(
     prompt = (
         "CANDIDATE STORIES:\n"
         + "\n".join(lines)
-        + "\n\nALREADY PUBLISHED "
-        "(flag already_published=true if a candidate is the same EVENT):\n"
+        + "\n\nALREADY PUBLISHED:\n"
         + pub
         + "\n\n"
-        "For each candidate return an item.\n"
-        "Set duplicate_of to the index of an EARLIER candidate "
-        "describing the same event/people/place, else -1.\n"
-        "Never point duplicate_of to itself or to a later candidate.\n"
-        "event_key = people+place+event in a few concise English words.\n"
-        "suitable=false for politics, tragedy, graphic, unverifiable or boring items.\n"
-        "is_evergreen=true if the story remains interesting regardless of date."
+        "For each candidate return an item."
     )
 
     res = gem.generate_json(prompt, TriageResult, system=TRIAGE_SYSTEM, temperature=0.2, tag="TRIAGE")
@@ -532,7 +462,6 @@ def triage(
 
 
 def rank_score(item: TriageItem) -> float:
-    """Internal ordering only; never shown to readers."""
     return (
         0.35 * item.viral_score
         + 0.25 * item.curiosity_score
@@ -543,8 +472,7 @@ def rank_score(item: TriageItem) -> float:
     )
 
 
-# ---------------------------------------------------------------- generation
-MAX_FIX_ROUNDS = 2  # correction rounds after the first draft (each round = 1 rewrite + 1 fact check)
+MAX_FIX_ROUNDS = 2
 
 
 def _clip(text: str, limit: int = 220) -> str:
@@ -570,22 +498,19 @@ def generate_content(
         f"SOURCE TITLE: {article.original_title}\n"
         f"SOURCE DATE: {date}\n"
         f"SOURCE TEXT:\n{text[:9000]}\n\n"
-        "TITLES ALREADY USED (do not repeat or closely resemble):\n"
+        "TITLES ALREADY USED:\n"
         + "\n".join(f"- {t}" for t in avoid_titles[:40] if str(t).strip())
     )
 
     if feedback:
         prompt += (
-            "\n\nCORRECTIONS REQUIRED (remove or fix these claims / follow these instructions):\n"
+            "\n\nCORRECTIONS REQUIRED:\n"
             + feedback
         )
 
         if previous is not None:
             prompt += (
-                "\n\nPREVIOUS DRAFT (JSON). Return the SAME structure. Keep everything that the SOURCE TEXT "
-                "supports, keep the same style and length, and change ONLY what is needed to apply the "
-                "corrections above. Also remove the same kind of unsupported detail anywhere else it appears "
-                "(article, SEO description, Facebook fields and scene ideas):\n"
+                "\n\nPREVIOUS DRAFT (JSON):\n"
                 + previous.model_dump_json()
             )
 
@@ -605,9 +530,9 @@ def generate_content(
     data["first_comment_hook"] = _strip_urls(data["first_comment_hook"])
     data["seo_description"] = str(data["seo_description"] or "").strip()[:155].rstrip()
 
-    comp_type = str(data.get("facebook_composition_type", "INSET_CIRCLE")).strip().upper()
-    if comp_type not in {"INSET_CIRCLE", "INSET_SQUARE", "SINGLE_HERO"}:
-        comp_type = "INSET_CIRCLE"
+    comp_type = str(data.get("facebook_composition_type", "DIPTYCH_SPLIT")).strip().upper()
+    if comp_type not in {"DIPTYCH_SPLIT", "INSET_CIRCLE", "INSET_SQUARE", "SINGLE_HERO"}:
+        comp_type = "DIPTYCH_SPLIT"
     data["facebook_composition_type"] = comp_type
 
     data["facebook_scene_idea"] = _strip_urls(data.get("facebook_scene_idea", ""))
@@ -656,7 +581,6 @@ def generate_verified(
     history_titles: list[str],
     is_title_taken: Callable[[str], bool],
 ) -> GeneratedContent:
-    """Generate -> fact-check -> up to MAX_FIX_ROUNDS corrective edits of the SAME draft -> title-dedup check."""
     content = generate_content(gem, article, history_titles)
 
     for round_no in range(MAX_FIX_ROUNDS + 1):
@@ -689,8 +613,7 @@ def generate_verified(
             history_titles + [content.blogger_title],
             feedback=(
                 "Use a clearly different blogger_title and facebook_title while "
-                "preserving exactly the same verified source facts. "
-                "Do not introduce any new factual claim."
+                "preserving exactly the same verified source facts."
             ),
             previous=content,
         )
@@ -698,11 +621,6 @@ def generate_verified(
         final_claims = _claims(fact_check(gem, article, content))
 
         if final_claims:
-            logger.warn("FACTCHECK", f"title regeneration introduced {len(final_claims)} unsupported claim(s)")
-
-            for claim in final_claims[:6]:
-                logger.warn("FACTCHECK", f"  - {_clip(claim)}")
-
             raise ValueError("title regeneration produced unsupported claims")
 
         if is_title_taken(content.blogger_title):
