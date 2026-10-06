@@ -50,7 +50,7 @@ class GeneratedContent(BaseModel):
     article_scene_idea: str
     facebook_scene_idea: str          # Main Photo (Background)
     facebook_detail_scene_idea: str = "" # Secondary Inset Photo (Circle/Square)
-    facebook_composition_type: str = "INSET_CIRCLE"
+    facebook_composition_type: str = "INSET_CIRCLE_RIGHT"
 
 
 class ImageResult(BaseModel):
