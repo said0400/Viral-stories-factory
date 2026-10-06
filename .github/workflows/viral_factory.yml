@@ -66,6 +66,9 @@ jobs:
 
       PEOPLE_IMAGE_STYLE: ${{ vars.PEOPLE_IMAGE_STYLE || 'reference' }}
       IMAGE_REQUIRED: ${{ vars.IMAGE_REQUIRED || 'true' }}
+      FACEBOOK_IMAGE_MODE: ${{ vars.FACEBOOK_IMAGE_MODE || 'generated' }}
+      FACEBOOK_LAYOUT: ${{ vars.FACEBOOK_LAYOUT || 'auto' }}
+      FACEBOOK_SEPARATE_IMAGE: ${{ vars.FACEBOOK_SEPARATE_IMAGE || 'true' }}
 
       DAY_TIMEZONE: ${{ vars.DAY_TIMEZONE || 'Africa/Casablanca' }}
 
