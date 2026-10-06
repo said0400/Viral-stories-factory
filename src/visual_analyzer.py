@@ -38,7 +38,7 @@ REFERENCE_IDENTITY_TYPES = {
     "building",
 }
 
-VISUAL_SYSTEM = """You analyse a news/story photo to prepare a NEW illustration of the same story.
+VISUAL_SYSTEM = """You analyse a news/story photo to prepare a faithful, realistic editorial photograph of the same story.
 
 Separate:
 - IDENTITY features that must stay the same when the subject is non-human
