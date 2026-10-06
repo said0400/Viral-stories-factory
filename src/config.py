@@ -85,11 +85,11 @@ class Settings:
     min_article_chars: int = 600
 
     # --- editorial / image
-    people_image_style: str = "reference"   # reference | illustration | faceless
+    people_image_style: str = "reference"   # real source faces are retained where a reference exists
     image_mode: str = "faithful"            # faithful | creative  (article image)
     cinematic_style: str = DEFAULT_CINEMATIC_STYLE
-    facebook_image_mode: str = "photo"      # photo | generated
-    facebook_layout: str = "auto"           # auto | single | split | inset
+    facebook_image_mode: str = "generated"  # source photos are AI-restyled before composing
+    facebook_layout: str = "auto"           # auto | insets | diptychs | triptychs
     facebook_separate_image: bool = True    # only used when facebook_image_mode=generated
     image_vlm_check: bool = True
     image_required: bool = True
@@ -168,17 +168,29 @@ class Settings:
         put("max_retries", int(_clamp(int(self.max_retries), 0, 10)))
         put("per_host_delay_seconds", float(_clamp(float(self.per_host_delay_seconds), 0.0, 60.0)))
 
-        style = str(self.people_image_style or "").strip().lower()
-        put("people_image_style", style if style in {"reference", "illustration", "faceless"} else "illustration")
+        # The requested policy is to retain visible faces, not anonymize them.
+        # Keep the old env field for compatibility but normalize legacy values.
+        put("people_image_style", "reference")
 
         mode = str(self.image_mode or "").strip().lower()
         put("image_mode", mode if mode in {"faithful", "creative"} else "faithful")
 
-        fb_mode = str(self.facebook_image_mode or "").strip().lower()
-        put("facebook_image_mode", fb_mode if fb_mode in {"photo", "generated"} else "photo")
+        # Raw source-photo publishing is no longer the default or an accepted mode.
+        put("facebook_image_mode", "generated")
 
         layout = str(self.facebook_layout or "").strip().lower()
-        put("facebook_layout", layout if layout in {"auto", "single", "split", "inset"} else "auto")
+        allowed_layouts = {
+            "auto", "single_hero", "inset_circle_right", "inset_circle_left",
+            "inset_square_right", "inset_square_left", "diptych_split", "diptych_stack",
+            "triptych", "triptych_bottom",
+        }
+        layout = layout.replace("-", "_").replace(" ", "_")
+        layout = {
+            "single": "single_hero",
+            "inset": "inset_circle_right",
+            "split": "diptych_split",
+        }.get(layout, layout)
+        put("facebook_layout", layout if layout in allowed_layouts else "auto")
 
         provider = str(self.image_provider or "").strip().lower()
         put("image_provider", provider if provider in {"cloudflare", "gemini"} else "cloudflare")
@@ -222,7 +234,7 @@ class Settings:
             people_image_style=_str("PEOPLE_IMAGE_STYLE", "reference", env),
             image_mode=_str("IMAGE_MODE", "faithful", env),
             cinematic_style=_str("CINEMATIC_STYLE", DEFAULT_CINEMATIC_STYLE, env),
-            facebook_image_mode=_str("FACEBOOK_IMAGE_MODE", "photo", env),
+            facebook_image_mode=_str("FACEBOOK_IMAGE_MODE", "generated", env),
             facebook_layout=_str("FACEBOOK_LAYOUT", "auto", env),
             facebook_separate_image=_bool("FACEBOOK_SEPARATE_IMAGE", True, env),
             image_vlm_check=_bool("IMAGE_VLM_CHECK", True, env),
@@ -366,12 +378,6 @@ class Settings:
                         "IMAGE_PROVIDER=gemini: Gemini image models may require billing "
                         "(free tier quota can be 0)."
                     )
-
-            if self.facebook_image_mode == "photo":
-                out.append(
-                    "FACEBOOK_IMAGE_MODE=photo: Facebook images are built from the source site's own "
-                    "photos (check usage rights; stories with minors use a generated image)."
-                )
 
         if need_publish:
             if not self.twilio_configured():
