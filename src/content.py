@@ -115,37 +115,37 @@ Do not include an image.
 Do not include a source/attribution line because the system adds it later.
 
 Structure:
-- strong hook introduction
-- logical story progression
-- necessary context
-- important verified details
-- clear ending based only on available information
+- Open with a vivid, highly engaging hook in the first paragraph, but never invent suspense or facts.
+- Build a complete narrative: what happened, the verified context, key details, and what is known now.
+- Use at least 2 meaningful <h2> subheadings (and <h3> only for useful subsections) when the source contains enough material.
+- Use short, connected paragraphs; explain unfamiliar context only when the source supports it.
+- End with a satisfying, clear takeaway based only on available information.
 
 Target 450-900 Arabic words when the source contains enough facts.
 If the source is thin, write less.
 NEVER pad the article to reach a word count.
 
-6. blogger_title:
+6. blogger_title (the article's main headline):
 - honest
 - intriguing
-- curiosity-driven
+- emotionally compelling and curiosity-driven
 - not misleading
 - no fabricated information
 - <= 90 characters
 - do not use sensational claims that the source does not support
 
-7. facebook_title:
+7. facebook_title (caption headline, NOT text to render inside the image):
 - short
 - strong
 - mobile friendly
-- honest curiosity gap
+- vivid, punchy, and curiosity-driving like a strong social headline
 - does not reveal everything
 - does not invent facts
 - does not use false clickbait
 
-8. facebook_post:
+8. facebook_post (caption, always separate from the image):
 Structure:
-HOOK -> INTEREST -> PARTIAL CONTEXT -> CURIOSITY.
+HOOK -> INTEREST -> PARTIAL CONTEXT -> CURIOSITY. Make it read like a vivid description of the actual visual, with a natural open loop and a clear reason to read the article.
 
 Do NOT include any URL or website placeholder.
 Do NOT reveal the entire story or main twist.
@@ -169,31 +169,35 @@ Examples:
 
 Do not add unrelated SEO labels.
 
-11. facebook_composition_type MUST be strictly one of these layouts:
-- "DIPTYCH_SPLIT": Use when comparing two people, two states (before/after), or two perspectives side-by-side (e.g. A doctor in uniform vs same doctor at a food stall).
-- "INSET_CIRCLE": Main subject fills 1:1 canvas, and a secondary close-up detail/explanatory image is placed in a circular inset on the top right.
-- "SINGLE_HERO": Single powerful subject carrying the whole narrative.
+11. facebook_composition_type MUST be strictly one of these square, text-free layouts:
+- "INSET_CIRCLE_RIGHT" / "INSET_CIRCLE_LEFT": one large main photo with a small round secondary photo in the chosen upper corner.
+- "INSET_SQUARE_RIGHT" / "INSET_SQUARE_LEFT": same composition with a square inset.
+- "DIPTYCH_SPLIT": two distinct photos side by side; best for two people, perspectives, or moments.
+- "DIPTYCH_STACK": two photos stacked; best for a clear before/after or sequence.
+- "TRIPTYCH": one large vertical panel beside two smaller stacked panels (three images).
+- "TRIPTYCH_BOTTOM": two small square panels above one wide lower panel (three images).
+- "SINGLE_HERO": only when the story genuinely has one compelling visual; otherwise prefer at least two photos.
+Choose the layout that best communicates the verified story at a glance. The image itself must never contain an added headline, caption, watermark, logo, arrow, or graphic text.
 
 12. facebook_scene_idea & facebook_detail_scene_idea:
 - facebook_scene_idea: Subject A / Left Panel (e.g. "close-up portrait of a Chinese female doctor wearing a lab coat").
 - facebook_detail_scene_idea: Subject B / Right Panel (e.g. "close-up portrait of the same woman smiling while making food in a street stall").
+- When source photographs are available, faithfully restyle at least two distinct source views and use them as panels; do not publish those source files as the final Facebook composite.
 
 STRICT VISUAL RULES:
-- MUST look like authentic, raw, unedited press news photographs taken on a real camera.
+- Aim for professional, high-contrast, emotionally legible editorial photojournalism; keep the people/subjects prominent and the crop mobile-first.
 - NEVER request illustrations, 3D renders, drawings, artwork, posters, or cartoons.
-- STRICTLY FORBIDDEN: Any embedded text, headlines, subtitles, watermarks, logos, graphic frames, yellow/red borders, or arrows.
-- Use ONLY factual elements supported by the source text.
+- Add no headlines, captions, watermarks, logos, arrows, decorative frames, or text overlays. Preserve only genuine, story-relevant signage already present in a source photo when legible; never invent or rewrite it.
+- Use ONLY factual elements supported by the source text or visible in a supplied reference photo.
 
 13. REAL PEOPLE:
-When real people are part of the story, describe only factual/contextual information supported by the source.
-Never invent facial features, expressions, age appearance, ethnicity, identity or other sensitive characteristics.
+When a source photo is supplied, keep the depicted person's recognizable face, apparent age, clothing, and key identity cues consistent with that photo. Do not replace the person with a generic face. Describe only factual/contextual information supported by the source; do not invent identity, biography, motives, or sensitive attributes.
 
-14. MINORS:
-If minors are part of the story, do not request identifiable facial depictions.
-Prefer a non-identifying, indirect or contextual visual treatment.
+14. PEOPLE OF ANY AGE:
+Do not blur, mask, anonymize, or intentionally hide a person's face when it is visible in the reference image. The image model may still vary facial details; never claim a perfect identity match.
 
 15. SOURCE IMAGE:
-A source image is a reference for the story and subject only.
+Use supplied source photos as faithful visual references for the corresponding AI-generated panel. Do not reproduce unrelated details, publisher watermarks, or social-media overlays.
 
 16. NON-HUMAN SUBJECTS:
 For animals, vehicles, buildings, places, objects, preserve important identifying characteristics supported by the source or reference image.
@@ -212,7 +216,7 @@ All fields must remain consistent with the same source facts."""
 
 FACT_SYSTEM = """You are a strict fact checker.
 
-Compare the ARTICLE, SEO DESCRIPTION, and FACEBOOK POST against the SOURCE TEXT.
+Compare the article headline/body/headings, SEO description, Facebook title/post/first comment, and all scene ideas against the verifiable facts in the SOURCE TEXT.
 
 List every concrete claim that is NOT supported by the source.
 
@@ -483,6 +487,29 @@ def _claims(check: FactCheckSchema) -> list[str]:
     return [str(c).strip() for c in (check.unsupported_claims or []) if str(c).strip()]
 
 
+def _quality_issues(article: SourceArticle, content: GeneratedContent) -> list[str]:
+    """Lightweight structure checks; never demand padding from thin source material."""
+    issues: list[str] = []
+    if not content.blogger_title.strip() or len(content.blogger_title.strip()) > 90:
+        issues.append("Keep the main article headline concise (90 characters or fewer).")
+    if not content.facebook_title.strip() or len(content.facebook_title.strip()) > 100:
+        issues.append("Write a short, compelling Facebook caption headline (100 characters or fewer).")
+
+    source_words = len(re.findall(r"\S+", article.article_text or article.description or ""))
+    body = BeautifulSoup(content.blogger_html or "", "lxml")
+    article_words = len(re.findall(r"\S+", body.get_text(" ", strip=True)))
+    if source_words >= 350:
+        headings = len(body.find_all(["h2", "h3"]))
+        paragraphs = len(body.find_all("p"))
+        if article_words < 240:
+            issues.append("Develop the article into a complete, useful narrative of at least 240 words; do not add unsupported facts.")
+        if headings < 2:
+            issues.append("Use at least two meaningful <h2> subheadings to organize the substantial article.")
+        if paragraphs < 4:
+            issues.append("Break the article into at least four readable paragraphs.")
+    return issues
+
+
 def generate_content(
     gem: GeminiClient,
     article: SourceArticle,
@@ -530,9 +557,18 @@ def generate_content(
     data["first_comment_hook"] = _strip_urls(data["first_comment_hook"])
     data["seo_description"] = str(data["seo_description"] or "").strip()[:155].rstrip()
 
-    comp_type = str(data.get("facebook_composition_type", "DIPTYCH_SPLIT")).strip().upper()
-    if comp_type not in {"DIPTYCH_SPLIT", "INSET_CIRCLE", "INSET_SQUARE", "SINGLE_HERO"}:
-        comp_type = "DIPTYCH_SPLIT"
+    comp_type = str(data.get("facebook_composition_type", "INSET_CIRCLE_RIGHT")).strip().upper()
+    comp_type = comp_type.replace("-", "_").replace(" ", "_")
+    comp_type = {
+        "INSET_CIRCLE": "INSET_CIRCLE_RIGHT",
+        "INSET_SQUARE": "INSET_SQUARE_RIGHT",
+        "SPLIT": "DIPTYCH_SPLIT",
+    }.get(comp_type, comp_type)
+    if comp_type not in {
+        "DIPTYCH_SPLIT", "DIPTYCH_STACK", "INSET_CIRCLE_RIGHT", "INSET_CIRCLE_LEFT",
+        "INSET_SQUARE_RIGHT", "INSET_SQUARE_LEFT", "TRIPTYCH", "TRIPTYCH_BOTTOM", "SINGLE_HERO",
+    }:
+        comp_type = "INSET_CIRCLE_RIGHT"
     data["facebook_composition_type"] = comp_type
 
     data["facebook_scene_idea"] = _strip_urls(data.get("facebook_scene_idea", ""))
@@ -586,22 +622,32 @@ def generate_verified(
     for round_no in range(MAX_FIX_ROUNDS + 1):
         check = fact_check(gem, article, content)
         claims = _claims(check)
+        structure_issues = _quality_issues(article, content)
 
-        if not claims:
+        if not claims and not structure_issues:
             break
 
-        logger.warn("FACTCHECK", f"{len(claims)} unsupported claim(s) (check {round_no + 1}/{MAX_FIX_ROUNDS + 1})")
+        if claims:
+            logger.warn("FACTCHECK", f"{len(claims)} unsupported claim(s) (check {round_no + 1}/{MAX_FIX_ROUNDS + 1})")
 
         for claim in claims[:6]:
             logger.warn("FACTCHECK", f"  - {_clip(claim)}")
 
         if round_no >= MAX_FIX_ROUNDS:
+            problems = []
+            if claims:
+                problems.append(f"{len(claims)} unsupported claim(s)")
+            if structure_issues:
+                problems.append(f"{len(structure_issues)} article structure issue(s)")
             raise ValueError(
-                f"content still contains {len(claims)} unsupported claim(s) "
-                f"after {MAX_FIX_ROUNDS} correction rounds"
+                f"content failed quality checks after {MAX_FIX_ROUNDS} correction rounds: "
+                + ", ".join(problems)
             )
 
-        feedback = "\n".join(f"- {c}" for c in claims)
+        feedback = "\n".join(
+            [*(f"- Remove or correct this unsupported claim: {c}" for c in claims),
+             *(f"- Structure requirement: {issue}" for issue in structure_issues)]
+        )
         content = generate_content(gem, article, history_titles, feedback=feedback, previous=content)
 
     if is_title_taken(content.blogger_title):
