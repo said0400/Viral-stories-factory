@@ -76,6 +76,8 @@ ABSOLUTE RULES
 
 1. Use ONLY facts found in the SOURCE TEXT.
 Never invent names, ages, dates, numbers, places, quotes, statements, outcomes, motives, feelings of real people, medical information, causes, relationships or other factual details.
+Do not infer popularity, audience size, virality, an account's quality, a photo's quality, visual details absent from SOURCE TEXT, or why a person/animal acted. Never use unsupported superlatives or claims such as “millions”.
+Do not attribute plans, motives, or human-like intentions to animals. Use a clearly marked subjective impression only when it cannot be mistaken for a reported fact.
 
 2. If something is unclear, write:
 'بحسب التقرير'
@@ -225,7 +227,7 @@ ARTICLE_STYLE_PROMPT = """اكتب بالعربية البسيطة المفهو�
 اكتب مقالًا كاملًا ومترابطًا، لكن لا تحشُ الكلام للوصول إلى طول محدد إذا كان المصدر قصيرًا."""
 
 ARTICLE_BODY_SYSTEM = """تصرّف ككاتب محتوى عربي محترف وخبير SEO ذي خبرة تحريرية طويلة. مهمتك الوحيدة كتابة متن المقال داخل blogger_html.
-التزم بمعلومات SOURCE TEXT فقط. لا تختلق أسماء أو أرقامًا أو أعمارًا أو اقتباسات أو أسبابًا أو دوافع أو تجربة شخصية.
+التزم بمعلومات SOURCE TEXT فقط. لا تختلق أسماء أو أرقامًا أو أعمارًا أو اقتباسات أو أسبابًا أو دوافع أو تجربة شخصية. لا تفترض شهرةً أو عدد متابعين أو مشاهدات أو جودة صور أو نوايا بشرية للحيوانات إذا لم يذكرها المصدر صراحة.
 استخدم HTML صالحًا بهذه الوسوم فقط: <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <blockquote>, <br>.
 لا تكتب عنوان المقال أو وصف SEO أو منشور Facebook؛ ستُنشأ هذه الحقول منفصلة.
 عندما يحتوي المصدر على مادة كافية، استخدم مقدمة جذابة بلا عنوان «مقدمة»، وعنوانين فرعيين <h2> على الأقل، وفقرات قصيرة، ونهاية واضحة مفيدة.
@@ -235,6 +237,7 @@ ARTICLE_BODY_SYSTEM = """تصرّف ككاتب محتوى عربي محترف و
 
 EDITORIAL_METADATA_SYSTEM = """أنت محرر عربي ومدقق للمعلومات. أنشئ العنوان الرئيسي ووصف SEO والتصنيفات وعناوين ونصوص Facebook اعتمادًا حصريًا على SOURCE TEXT ومتن المقال المرفق.
 لا تضف واقعة أو رقمًا أو اسمًا غير موجود في المصدر، ولا تجعل الفضول تضليلًا أو clickbait كاذبًا.
+لا تخترع أرقام المشاهدات أو المتابعين أو الشعبية أو جودة الصور أو دوافع الأشخاص والحيوانات. إذا لم يثبت المصدر التفصيل، احذفه بدل تخمينه.
 blogger_title واضح وجذاب ولا يتجاوز 90 حرفًا. seo_description لا يتجاوز 155 حرفًا.
 facebook_title قصير وقوي ومناسب للهاتف. facebook_post يبني هوك ثم اهتمامًا وسياقًا جزئيًا وفضولًا صادقًا، ولا يكشف كل القصة ولا يحتوي رابطًا.
 first_comment_hook جملة قصيرة تدعو إلى قراءة التفاصيل من دون رابط أو ادعاء غير مسند.
@@ -247,7 +250,9 @@ FACT_SYSTEM = """You are a strict fact checker.
 
 Compare the article headline/body/headings, SEO description, Facebook title/post/first comment, and all scene ideas against the verifiable facts in the SOURCE TEXT.
 
-List every concrete claim that is NOT supported by the source.
+Flag every checkable factual assertion that is not supported, especially numbers, popularity/reach claims, causal claims, motives, identity, and claims about an account or image.
+Do not flag an unmistakable figure of speech or clearly subjective impression as a factual claim unless it also asserts a concrete event or detail. Do not excuse unsupported numbers or factual-sounding claims as “style”.
+When flagging a problem, quote or identify the smallest exact claim that needs removal or correction.
 
 Return only claims that genuinely require correction.
 If everything is supported, return an empty unsupported_claims list and all_claims_supported=true."""
@@ -505,7 +510,7 @@ def rank_score(item: TriageItem) -> float:
     )
 
 
-MAX_FIX_ROUNDS = 2
+MAX_FIX_ROUNDS = 3
 
 
 def _clip(text: str, limit: int = 220) -> str:
@@ -560,7 +565,8 @@ def generate_content(
 
     if feedback:
         prompt += (
-            "\n\nCORRECTIONS REQUIRED:\n"
+            "\n\nCORRECTIONS REQUIRED — HIGHEST PRIORITY:\n"
+            "Remove each flagged assertion unless SOURCE TEXT explicitly supports it. Do not merely reword it and do not replace it with a new unsupported claim. Recheck every title, paragraph, SEO field, Facebook line, and scene hint against the source.\n"
             + feedback
         )
 
