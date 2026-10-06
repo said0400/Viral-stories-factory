@@ -354,7 +354,7 @@ class GeminiClient:
                     break
                 except GeminiError as exc:
                     last = exc
-                    if not is_last:
+                    if index + 1 < len(models):
                         logger.warn(
                             tag,
                             f"Model '{name}' failed ({str(exc)[:200]}). Falling back to '{models[index + 1]}'",
