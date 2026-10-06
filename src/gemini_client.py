@@ -30,7 +30,7 @@ _RETRYABLE_WORDS = (
 
 # Calls with these tags use the strong model chain (GEMINI_CONTENT_MODEL + fallbacks).
 # Everything else (triage, visual analysis, image check) uses the cheaper GEMINI_MODEL.
-_STRONG_TAGS = {"CONTENT", "FACTCHECK"}
+_STRONG_TAGS = {"CONTENT", "ARTICLE", "METADATA", "FACTCHECK"}
 
 # While another model is still available in the chain, give up on a struggling model after this many attempts.
 _ATTEMPTS_BEFORE_FALLBACK = 2
