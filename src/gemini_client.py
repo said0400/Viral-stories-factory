@@ -178,13 +178,14 @@ class GeminiClient:
             chain = [self.cfg.gemini_model, self.cfg.gemini_fallback_model]
 
         out: list[str] = []
+        retired = {"gemini-2.5-flash"}
 
         for name in chain:
             name = (name or "").strip()
-            if name and name not in out:
+            if name and name.lower() not in retired and name not in out:
                 out.append(name)
 
-        return out
+        return out or ["gemini-3.5-flash"]
 
     # ------------------------------------------------------------------
     # JSON generation
@@ -332,7 +333,6 @@ class GeminiClient:
 
             key_limited = False
             for index, name in enumerate(models):
-                is_last = index == len(models) - 1
                 try:
                     result = self._generate_json_model(
                         name,
@@ -342,7 +342,9 @@ class GeminiClient:
                         system=system,
                         temperature=temperature,
                         tag=tag,
-                        max_attempts=None if is_last else _ATTEMPTS_BEFORE_FALLBACK,
+                        # Bound every model to two attempts. The final fallback must not
+                        # consume the full global retry budget after earlier models failed.
+                        max_attempts=_ATTEMPTS_BEFORE_FALLBACK,
                     )
                     logger.log(tag, f"model used: {name}; key slot={key_index + 1}")
                     return result
