@@ -18,8 +18,10 @@ from .config import Settings
 from .exporter import export_bundle
 from .facebook import FacebookError, build_content_package, build_package
 from .gemini_client import GeminiClient, GeminiError, ImageGenError
+from .groq_client import GroqClient
 from .image_generator import ImageGenerator
 from .image_publisher import publish_images
+from .llm_router import LLMRouter
 from .logger import error, log, setup_logging, warn
 from .models import SourceArticle, StoryCache, StoryState
 from .twilio_whatsapp import WhatsAppClient, WhatsAppError
@@ -53,8 +55,10 @@ class Factory:
         self.work = dataclasses.replace(cfg, data_dir=cfg.dry_run_dir) if self.dry else cfg
         self.hist = H.History(cfg.history_file, cfg.cache_dir, cfg.day_timezone)
         self.gem = GeminiClient(cfg)
+        self.groq = GroqClient(cfg)
+        self.llm = LLMRouter(self.gem, self.groq)
         self.fetcher = PoliteFetcher(cfg.user_agent, cfg.request_timeout, cfg.per_host_delay_seconds)
-        self.imgs = ImageGenerator(self.work, self.gem, fetcher=self.fetcher)
+        self.imgs = ImageGenerator(self.work, self.llm, fetcher=self.fetcher)
         self.blogger = None if self.dry else BloggerClient(cfg)
         self.whatsapp: WhatsAppClient | None = None
         self.completed = self.partial = self.failed = 0
@@ -199,7 +203,7 @@ class Factory:
                     batch.append(by_src[k].pop(0))
 
         try:
-            items = editorial.triage(self.gem, batch, self.hist.recent_published_titles())
+            items = editorial.triage(self.llm, batch, self.hist.recent_published_titles())
         except GeminiError as exc:
             error("SELECTION", f"triage failed: {exc}")
             return []
@@ -343,7 +347,7 @@ class Factory:
 
             try:
                 cache.content = editorial.generate_verified(
-                    self.gem,
+                    self.llm,
                     article,
                     self.hist.recent_blogger_titles(),
                     lambda t: self.hist.any_similar_published_title(t),
@@ -391,7 +395,7 @@ class Factory:
                     ref = visual_analyzer.acquire_source_image(article, self.fetcher)
                     log("VISUAL", "Reference image found" if ref else "No reference image available")
 
-                    cache.visual = visual_analyzer.analyze(self.gem, article, (ref[0], ref[1]) if ref else None)
+                    cache.visual = visual_analyzer.analyze(self.llm, article, (ref[0], ref[1]) if ref else None)
 
                     log(
                         "VISUAL",
