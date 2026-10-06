@@ -371,7 +371,7 @@ class Factory:
 
         content = cache.content
 
-        # ---- 2. Visual analysis + new AI image
+        # ---- 2. Article hero image (AI) + original-photo Facebook composite
         image_exists = bool(cache.image and _is_file(cache.image.path))
 
         if image_exists:
