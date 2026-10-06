@@ -215,6 +215,23 @@ class ContentSchema(BaseModel):
     facebook_composition_type: str
 
 
+class ArticleBodySchema(BaseModel):
+    blogger_html: str
+
+
+class EditorialMetadataSchema(BaseModel):
+    blogger_title: str
+    seo_description: str
+    labels: list[str]
+    facebook_title: str
+    facebook_post: str
+    first_comment_hook: str
+    article_scene_idea: str
+    facebook_scene_idea: str
+    facebook_detail_scene_idea: str
+    facebook_composition_type: str
+
+
 class FactCheckSchema(BaseModel):
     all_claims_supported: bool
     unsupported_claims: list[str]
