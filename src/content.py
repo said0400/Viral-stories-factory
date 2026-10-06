@@ -1,4 +1,4 @@
-"""Gemini-driven editorial steps: triage/viral selection, Arabic content, fact check."""
+"""Groq/Gemini editorial steps: triage, Arabic content generation, and fact checking."""
 from __future__ import annotations
 
 import html as html_lib
@@ -11,7 +11,8 @@ from bs4 import BeautifulSoup, Comment
 from . import logger
 from .gemini_client import GeminiClient
 from .models import (
-    ContentSchema,
+    ArticleBodySchema,
+    EditorialMetadataSchema,
     FactCheckSchema,
     GeneratedContent,
     SourceArticle,
@@ -213,6 +214,34 @@ seo_description must be <= 155 characters in Arabic.
 
 20. FINAL CONSISTENCY:
 All fields must remain consistent with the same source facts."""
+
+ARTICLE_STYLE_PROMPT = """اكتب بالعربية البسيطة المفهومة لمعظم القراء العرب، بصوت تحريري طبيعي ودافئ.
+نوّع أطوال الجمل والإيقاع، واختر مفردات دقيقة وغير مكررة من دون تعقيد مصطنع أو حشو.
+تجنب العبارات المستهلكة مثل: «في الآونة الأخيرة»، «علاوة على ذلك»، «في الختام»، «تجدر الإشارة»، «من الجدير بالذكر»، «يمثل»، و«يعتبر».
+اختر نبرة مناسبة للموضوع تلقائيًا: ودية أو تعليمية أو حماسية، من دون افتعال.
+لا تدّعِ أنك إنسان أو أنك جرّبت شيئًا، ولا تختلق تجربة شخصية بصيغة المتكلم؛ استخدم المتكلم فقط إذا كانت تجربة الكاتب مثبتة في المصدر.
+ابدأ بهوك صادق وجذاب من دون اختلاق تشويق، ثم نظّم المقال بعناوين <h2> و<h3> عند الحاجة وفقرات قصيرة واضحة.
+قدّم للقارئ قيمة وسياقًا أو خلاصة عملية مما يثبته المصدر، ولا تملأ المقال بمعلومات خارج النص المصدر.
+اكتب مقالًا كاملًا ومترابطًا، لكن لا تحشُ الكلام للوصول إلى طول محدد إذا كان المصدر قصيرًا."""
+
+ARTICLE_BODY_SYSTEM = """تصرّف ككاتب محتوى عربي محترف وخبير SEO ذي خبرة تحريرية طويلة. مهمتك الوحيدة كتابة متن المقال داخل blogger_html.
+التزم بمعلومات SOURCE TEXT فقط. لا تختلق أسماء أو أرقامًا أو أعمارًا أو اقتباسات أو أسبابًا أو دوافع أو تجربة شخصية.
+استخدم HTML صالحًا بهذه الوسوم فقط: <h2>, <h3>, <p>, <ul>, <ol>, <li>, <strong>, <em>, <blockquote>, <br>.
+لا تكتب عنوان المقال أو وصف SEO أو منشور Facebook؛ ستُنشأ هذه الحقول منفصلة.
+عندما يحتوي المصدر على مادة كافية، استخدم مقدمة جذابة بلا عنوان «مقدمة»، وعنوانين فرعيين <h2> على الأقل، وفقرات قصيرة، ونهاية واضحة مفيدة.
+استهدف 450-900 كلمة فقط إذا كان المصدر غنيًا بما يكفي؛ اكتب أقل عندما تكون الحقائق محدودة ولا تحشو المقال.
+إذا كان التفصيل غير مؤكد، انسبه إلى التقرير أو قل إن المصدر لم يوضحه.
+""" + ARTICLE_STYLE_PROMPT
+
+EDITORIAL_METADATA_SYSTEM = """أنت محرر عربي ومدقق للمعلومات. أنشئ العنوان الرئيسي ووصف SEO والتصنيفات وعناوين ونصوص Facebook اعتمادًا حصريًا على SOURCE TEXT ومتن المقال المرفق.
+لا تضف واقعة أو رقمًا أو اسمًا غير موجود في المصدر، ولا تجعل الفضول تضليلًا أو clickbait كاذبًا.
+blogger_title واضح وجذاب ولا يتجاوز 90 حرفًا. seo_description لا يتجاوز 155 حرفًا.
+facebook_title قصير وقوي ومناسب للهاتف. facebook_post يبني هوك ثم اهتمامًا وسياقًا جزئيًا وفضولًا صادقًا، ولا يكشف كل القصة ولا يحتوي رابطًا.
+first_comment_hook جملة قصيرة تدعو إلى قراءة التفاصيل من دون رابط أو ادعاء غير مسند.
+labels من 2 إلى 5 تصنيفات عربية ذات صلة.
+اختر facebook_composition_type من: INSET_CIRCLE_RIGHT, INSET_CIRCLE_LEFT, INSET_SQUARE_RIGHT, INSET_SQUARE_LEFT, DIPTYCH_SPLIT, DIPTYCH_STACK, TRIPTYCH, TRIPTYCH_BOTTOM, SINGLE_HERO.
+اكتب article_scene_idea وfacebook_scene_idea وfacebook_detail_scene_idea كإشارات تحليلية موجزة مدعومة بالمصدر فقط؛ لا تطلب توليد صورة Facebook.
+لا تعِد كتابة blogger_html؛ أعد حقول البيانات التحريرية فقط وفق المخطط."""
 
 FACT_SYSTEM = """You are a strict fact checker.
 
@@ -541,15 +570,30 @@ def generate_content(
                 + previous.model_dump_json()
             )
 
-    res = gem.generate_json(
-        prompt,
-        ContentSchema,
-        system=CONTENT_SYSTEM,
+    body_result = gem.generate_json(
+        prompt + "\n\nWrite only the complete blogger_html article body.",
+        ArticleBodySchema,
+        system=ARTICLE_BODY_SYSTEM,
         temperature=0.3 if previous is not None else 0.5,
-        tag="CONTENT",
+        tag="ARTICLE",
+    )
+    body_text = BeautifulSoup(body_result.blogger_html, "lxml").get_text(" ", strip=True)
+    metadata_prompt = (
+        prompt
+        + "\n\nGEMINI ARTICLE BODY (use as context; do not rewrite):\n"
+        + body_text[:12000]
+        + "\n\nGenerate only the article title, SEO, labels, Facebook copy, and visual-analysis hints."
+    )
+    metadata_result = gem.generate_json(
+        metadata_prompt,
+        EditorialMetadataSchema,
+        system=EDITORIAL_METADATA_SYSTEM,
+        temperature=0.3 if previous is not None else 0.5,
+        tag="METADATA",
     )
 
-    data = res.model_dump()
+    data = metadata_result.model_dump()
+    data["blogger_html"] = body_result.blogger_html
 
     data["blogger_title"] = _strip_urls(data["blogger_title"])
     data["facebook_title"] = _strip_urls(data["facebook_title"])
