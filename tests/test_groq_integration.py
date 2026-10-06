@@ -148,3 +148,96 @@ def test_photo_analysis_splits_six_candidates_into_vision_batches():
     assert analyzer.batch_sizes == [3, 3]
     assert analyzer.indices == [[0, 1, 2], [3, 4, 5]]
     assert [photo.reason for photo in selected] == ["subject 0", "subject 1", "subject 2"]
+
+
+def test_gpt_oss_uses_low_hidden_reasoning_for_json(monkeypatch):
+    captured = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": '{"value":"ok"}'}}]}
+
+    def fake_post(url, **kwargs):
+        captured.update(kwargs["json"])
+        return Response()
+
+    monkeypatch.setattr("src.groq_client.requests.post", fake_post)
+    client = GroqClient(Settings(groq_api_key="secret", groq_model="openai/gpt-oss-120b"))
+    assert client.generate_json("return JSON", ResultSchema).value == "ok"
+    assert captured["reasoning_effort"] == "low"
+    assert captured["reasoning_format"] == "hidden"
+    assert len(captured["messages"]) == 1
+    assert captured["messages"][0]["role"] == "user"
+    assert "JSON Schema" in captured["messages"][0]["content"]
+
+
+def test_groq_retries_once_after_schema_validation_error(monkeypatch):
+    outputs = iter(['{"value": 123}', '{"value": "fixed"}'])
+    requests_seen = []
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": next(outputs)}}]}
+
+    def fake_post(url, **kwargs):
+        requests_seen.append(kwargs["json"])
+        return Response()
+
+    monkeypatch.setattr("src.groq_client.requests.post", fake_post)
+    monkeypatch.setattr("src.groq_client.time.sleep", lambda _seconds: None)
+    client = GroqClient(Settings(groq_api_key="secret", groq_model="test-model"))
+    assert client.generate_json("return JSON", ResultSchema).value == "fixed"
+    assert len(requests_seen) == 2
+    assert "Try again from scratch" in requests_seen[1]["messages"][-1]["content"]
+
+
+def test_groq_http_error_includes_safe_status_and_provider_reason():
+    import pytest
+    from src.groq_client import GroqError
+
+    class Response:
+        status_code = 401
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"error": {"code": "invalid_api_key", "message": "API key rejected"}}
+
+    client = GroqClient(Settings(groq_api_key="secret-value"))
+    error = client._http_error(Response(), "METADATA")
+    assert isinstance(error, GroqError)
+    assert error.status_code == 401
+    assert not error.retryable
+    assert "invalid_api_key" in str(error)
+    assert "secret-value" not in str(error)
+
+
+def test_qwen_vision_keeps_analysis_prompt_when_merging_json_instructions(monkeypatch):
+    captured = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": '{"value":"ok"}'}}]}
+
+    def fake_post(url, **kwargs):
+        captured.update(kwargs["json"])
+        return Response()
+
+    monkeypatch.setattr("src.groq_client.requests.post", fake_post)
+    client = GroqClient(Settings(groq_api_key="secret", groq_vision_model="qwen/qwen3.8-27b"))
+    assert client.generate_json(
+        "Describe the image's focal subject", ResultSchema,
+        images=[(b"image-bytes", "image/jpeg")],
+    ).value == "ok"
+    content = captured["messages"][0]["content"]
+    assert "Describe the image's focal subject" in content[0]["text"]
+    assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert captured["reasoning_effort"] == "low"
