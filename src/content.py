@@ -169,7 +169,7 @@ Examples:
 
 Do not add unrelated SEO labels.
 
-11. facebook_composition_type MUST be strictly one of these square, text-free layouts:
+11. facebook_composition_type MUST be strictly one of these square layouts made only from original source photos:
 - "INSET_CIRCLE_RIGHT" / "INSET_CIRCLE_LEFT": one large main photo with a small round secondary photo in the chosen upper corner.
 - "INSET_SQUARE_RIGHT" / "INSET_SQUARE_LEFT": same composition with a square inset.
 - "DIPTYCH_SPLIT": two distinct photos side by side; best for two people, perspectives, or moments.
@@ -177,27 +177,27 @@ Do not add unrelated SEO labels.
 - "TRIPTYCH": one large vertical panel beside two smaller stacked panels (three images).
 - "TRIPTYCH_BOTTOM": two small square panels above one wide lower panel (three images).
 - "SINGLE_HERO": only when the story genuinely has one compelling visual; otherwise prefer at least two photos.
-Choose the layout that best communicates the verified story at a glance. The image itself must never contain an added headline, caption, watermark, logo, arrow, or graphic text.
+Choose the layout that best communicates the verified story at a glance. The Facebook image is assembled from original article images only; do not request newly generated or AI-restyled pictures. The hook and headline belong in facebook_title/facebook_post, outside the image.
 
 12. facebook_scene_idea & facebook_detail_scene_idea:
-- facebook_scene_idea: Subject A / Left Panel (e.g. "close-up portrait of a Chinese female doctor wearing a lab coat").
-- facebook_detail_scene_idea: Subject B / Right Panel (e.g. "close-up portrait of the same woman smiling while making food in a street stall").
-- When source photographs are available, faithfully restyle at least two distinct source views and use them as panels; do not publish those source files as the final Facebook composite.
+- Give concise descriptions of the two most visually important, source-supported details that would help select original article photos.
+- These descriptions are analysis hints only. Never invent a new scene or use them to request an AI-generated/repainted image.
+- If the official article has only one usable photo, the image pipeline may show a magnified crop of that same original photo as a secondary detail.
 
 STRICT VISUAL RULES:
-- Aim for professional, high-contrast, emotionally legible editorial photojournalism; keep the people/subjects prominent and the crop mobile-first.
-- NEVER request illustrations, 3D renders, drawings, artwork, posters, or cartoons.
-- Add no headlines, captions, watermarks, logos, arrows, decorative frames, or text overlays. Preserve only genuine, story-relevant signage already present in a source photo when legible; never invent or rewrite it.
-- Use ONLY factual elements supported by the source text or visible in a supplied reference photo.
+- The square Facebook image must use only original images downloaded from the official article; the image model must not generate, repaint, alter, or replace any photo.
+- The compositor may only crop, resize, zoom, and arrange the original pixels. Do not add text or graphics to the image; keep the hook in facebook_post.
+- Never remove or rewrite source-native signs, captions, arrows, logos, watermarks, or other marks: they are part of the original photograph. The visual analyzer chooses relevant material; it does not edit pixels.
+- Use ONLY factual elements supported by the source text or visible in the original article photos.
 
 13. REAL PEOPLE:
-When a source photo is supplied, keep the depicted person's recognizable face, apparent age, clothing, and key identity cues consistent with that photo. Do not replace the person with a generic face. Describe only factual/contextual information supported by the source; do not invent identity, biography, motives, or sensitive attributes.
+For the AI-generated article hero only, when a source photo is supplied, keep the depicted person's recognizable face, apparent age, clothing, and key identity cues consistent with that photo. Facebook photos are original source pixels and are not generated. Describe only factual/contextual information supported by the source; do not invent identity, biography, motives, or sensitive attributes.
 
 14. PEOPLE OF ANY AGE:
-Do not blur, mask, anonymize, or intentionally hide a person's face when it is visible in the reference image. The image model may still vary facial details; never claim a perfect identity match.
+Do not blur, mask, anonymize, or intentionally hide a person's face when it is visible in a reference for the AI-generated article image. The image model may still vary facial details; never claim a perfect identity match.
 
 15. SOURCE IMAGE:
-Use supplied source photos as faithful visual references for the corresponding AI-generated panel. Do not reproduce unrelated details, publisher watermarks, or social-media overlays.
+The Facebook visual is assembled from the actual photos found in the official article. Prefer the most story-relevant distinct photos and identify a focal crop for enlargement, while keeping useful surrounding context. Do not synthesize missing image content.
 
 16. NON-HUMAN SUBJECTS:
 For animals, vehicles, buildings, places, objects, preserve important identifying characteristics supported by the source or reference image.
