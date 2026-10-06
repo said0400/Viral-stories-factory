@@ -50,7 +50,12 @@ class FakeGemini:
         if schema is ContentSchema:
             return ContentSchema(
                 blogger_title="عنوان تجريبي",
-                blogger_html="<p>" + "نص " * 80 + "</p>",
+                blogger_html=(
+                    "<p>" + "مقدمة " * 65 + "</p>"
+                    "<h2>ما الذي حدث؟</h2><p>" + "تفصيل " * 65 + "</p>"
+                    "<h2>لماذا يلفت الأمر الانتباه؟</h2><p>" + "سياق " * 65 + "</p>"
+                    "<p>" + "خلاصة " * 65 + "</p>"
+                ),
                 seo_description="وصف",
                 labels=["غرائب"],
                 facebook_title="عنوان فيسبوك",
@@ -61,6 +66,8 @@ class FakeGemini:
                 first_comment_hook="التفاصيل هنا",
                 article_scene_idea="a cozy street",
                 facebook_scene_idea="a market",
+                facebook_detail_scene_idea="a closer view of the same market",
+                facebook_composition_type="INSET_CIRCLE_RIGHT",
             )
 
         if schema is FactCheckSchema:
@@ -93,7 +100,7 @@ class FakeGemini:
         raise AssertionError(schema)
 
 
-def _png():
+def _png(seed=0):
     im = Image.new(
         "RGB",
         (900, 700),
@@ -105,9 +112,9 @@ def _png():
             im.putpixel(
                 (x, y),
                 (
-                    (x * 3) % 255,
-                    (y * 5) % 255,
-                    (x + y) % 255,
+                    (x * 3 + seed * 83) % 255,
+                    (y * 5 + seed * 59) % 255,
+                    (x + y + seed * 37) % 255,
                 ),
             )
 
@@ -117,8 +124,12 @@ def _png():
 
 
 class FakeProvider:
+    def __init__(self):
+        self.calls = 0
+
     def generate(self, prompt, refs, aspect):
-        return _png(), "image/png"
+        self.calls += 1
+        return _png(self.calls), "image/png"
 
 
 def test_dry_run_end_to_end(tmp_path, monkeypatch):
@@ -174,7 +185,10 @@ def test_dry_run_end_to_end(tmp_path, monkeypatch):
         dry_run=True,
         dry_run_generate_images=True,
         data_dir=tmp_path,
+        dry_run_dir=tmp_path / "dry_run",
         history_file=tmp_path / "history.json",
+        cache_dir=tmp_path / "cache",
+        exports_dir=tmp_path / "exports",
         image_vlm_check=True,
         gemini_api_key="k",
     )
