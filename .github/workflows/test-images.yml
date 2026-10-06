@@ -1,0 +1,81 @@
+name: Test Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      step:
+        description: "raw | restyle | facebook | full | all"
+        required: true
+        default: "raw"
+      image_urls:
+        description: "Source photo URLs separated by spaces (needed for all steps except raw)"
+        required: false
+        default: ""
+      title:
+        description: "Story title (used in prompts)"
+        required: false
+        default: "A surprising story with a clear main subject"
+      scene:
+        description: "Short factual scene description"
+        required: false
+        default: ""
+      layout:
+        description: "auto | all | inset_circle_right | diptych_split | triptych ..."
+        required: false
+        default: "auto"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      IMAGE_PROVIDER: ${{ vars.IMAGE_PROVIDER || 'cloudflare' }}
+      CLOUDFLARE_IMAGE_MODEL: ${{ vars.CLOUDFLARE_IMAGE_MODEL || '@cf/black-forest-labs/flux-2-dev' }}
+      CLOUDFLARE_IMAGE_STEPS: ${{ vars.CLOUDFLARE_IMAGE_STEPS || '25' }}
+      IMAGE_LONG_SIDE: ${{ vars.IMAGE_LONG_SIDE || '1536' }}
+      CLOUDFLARE_TIMEOUT: ${{ vars.CLOUDFLARE_TIMEOUT || '300' }}
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.5-flash-lite' }}
+      GROQ_MODEL: ${{ vars.GROQ_MODEL || 'openai/gpt-oss-120b' }}
+      GROQ_VISION_MODEL: ${{ vars.GROQ_VISION_MODEL || 'qwen/qwen3.8-27b' }}
+      GEMINI_API_KEY_1: ${{ secrets.GEMINI_API_KEY_1 || secrets.GEMINI_API_KEY }}
+      GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+      GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # Inputs are passed through env to avoid shell injection.
+      IN_STEP: ${{ inputs.step }}
+      IN_URLS: ${{ inputs.image_urls }}
+      IN_TITLE: ${{ inputs.title }}
+      IN_SCENE: ${{ inputs.scene }}
+      IN_LAYOUT: ${{ inputs.layout }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Run image test
+        run: |
+          args=(--step "$IN_STEP" --title "$IN_TITLE" --scene "$IN_SCENE" --layout "$IN_LAYOUT")
+          for u in $IN_URLS; do args+=(--image-url "$u"); done
+          python -m src.test_images "${args[@]}"
+
+      - name: Upload generated images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-images-${{ github.run_id }}
+          path: data/test_images/
+          if-no-files-found: ignore
+          retention-days: 7
