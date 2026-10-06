@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 DEFAULT_EXPORTS_DIR = "data/exports"
 DEFAULT_CF_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev"
 DEFAULT_CONTENT_MODEL = "gemini-3.8-flash"
-DEFAULT_CONTENT_FALLBACKS = "gemini-3.6-flash,gemini-3.5-flash,gemini-2.5-flash"
+DEFAULT_CONTENT_FALLBACKS = "gemini-3.6-flash,gemini-3.5-flash"
 DEFAULT_CINEMATIC_STYLE = (
     "premium editorial photojournalism, clear natural directional light, crisp subject detail, "
     "realistic skin and textures, balanced exposure, rich but natural color, clean contrast, "
@@ -100,7 +100,7 @@ class Settings:
 
     # --- gemini
     gemini_model: str = "gemini-3.5-flash-lite"              # triage / visual analysis / image check
-    gemini_fallback_model: str = "gemini-2.5-flash"
+    gemini_fallback_model: str = "gemini-3.5-flash"
     gemini_content_model: str = DEFAULT_CONTENT_MODEL         # article / posts / titles / fact check
     gemini_content_fallbacks: str = DEFAULT_CONTENT_FALLBACKS  # comma separated
     gemini_image_model: str = "gemini-3.1-flash-lite-image"
@@ -252,7 +252,7 @@ class Settings:
             image_required=_bool("IMAGE_REQUIRED", True, env),
             day_timezone=_str("DAY_TIMEZONE", "Africa/Casablanca", env),
             gemini_model=_str("GEMINI_MODEL", "gemini-3.5-flash-lite", env),
-            gemini_fallback_model=_str("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash", env),
+            gemini_fallback_model=_str("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash", env),
             gemini_content_model=_str("GEMINI_CONTENT_MODEL", DEFAULT_CONTENT_MODEL, env),
             gemini_content_fallbacks=_str("GEMINI_CONTENT_FALLBACKS", DEFAULT_CONTENT_FALLBACKS, env),
             gemini_image_model=_str("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-lite-image", env),
@@ -317,13 +317,14 @@ class Settings:
         """Model chain for the writing + fact-check steps (strongest first, de-duplicated)."""
         names = [self.gemini_content_model, *self.gemini_content_fallbacks.split(",")]
         out: list[str] = []
+        retired = {"gemini-2.5-flash"}
 
         for name in names:
             name = name.strip()
-            if name and name not in out:
+            if name and name.lower() not in retired and name not in out:
                 out.append(name)
 
-        return out
+        return out or ["gemini-3.5-flash"]
 
     # ------------------------------------------------------------------
     # Readiness
