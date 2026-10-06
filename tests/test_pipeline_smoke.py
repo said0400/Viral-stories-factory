@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from PIL import Image
 
+from src import image_generator as image_mod
 from src import main as m
 from src.config import Settings
 from src.models import (
@@ -16,6 +17,7 @@ from src.models import (
     TriageResult,
     VisualSchema,
 )
+from src.photo_composer import PhotoAssessmentBatch, PhotoAssessmentSchema
 
 
 class FakeGemini:
@@ -97,6 +99,24 @@ class FakeGemini:
                 reason="ok",
             )
 
+        if schema is PhotoAssessmentBatch:
+            count = len(kw.get("images") or [])
+            return PhotoAssessmentBatch(
+                items=[
+                    PhotoAssessmentSchema(
+                        index=i,
+                        relevance_score=90 - i * 5,
+                        visual_impact_score=85 - i * 5,
+                        focus_center_x=500,
+                        focus_center_y=450,
+                        focus_width=380,
+                        focus_height=420,
+                        focal_description="main story subject",
+                    )
+                    for i in range(count)
+                ]
+            )
+
         raise AssertionError(schema)
 
 
@@ -121,6 +141,10 @@ def _png(seed=0):
     b = io.BytesIO()
     im.save(b, "PNG")
     return b.getvalue()
+
+
+def _source_photo(seed=0):
+    return Image.open(io.BytesIO(_png(seed))).convert("RGB")
 
 
 class FakeProvider:
@@ -151,6 +175,11 @@ def test_dry_run_end_to_end(tmp_path, monkeypatch):
         m,
         "GeminiClient",
         FakeGemini,
+    )
+    monkeypatch.setattr(
+        image_mod,
+        "fetch_photos",
+        lambda *args, **kwargs: [_source_photo(31), _source_photo(32)],
     )
 
     monkeypatch.setattr(
@@ -198,6 +227,7 @@ def test_dry_run_end_to_end(tmp_path, monkeypatch):
     f.imgs.provider = FakeProvider()
 
     assert f.run() == 0
+    assert f.imgs.provider.calls == 1  # article only; Facebook uses original source photos
 
     previews = list(
         (tmp_path / "dry_run").glob("*.json")
@@ -210,6 +240,10 @@ def test_dry_run_end_to_end(tmp_path, monkeypatch):
     )
 
     assert generated_images
+
+    facebook_images = list((tmp_path / "dry_run" / "images").glob("*_facebook.jpg"))
+    assert facebook_images
+    assert Image.open(facebook_images[0]).size == (1080, 1080)
 
     history_file = tmp_path / "history.json"
 
