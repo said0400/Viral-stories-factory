@@ -9,7 +9,8 @@ from src import image_generator as image_mod
 from src import main as m
 from src.config import Settings
 from src.models import (
-    ContentSchema,
+    ArticleBodySchema,
+    EditorialMetadataSchema,
     FactCheckSchema,
     ImageCheckSchema,
     SourceArticle,
@@ -49,22 +50,23 @@ class FakeGemini:
                 ]
             )
 
-        if schema is ContentSchema:
-            return ContentSchema(
-                blogger_title="عنوان تجريبي",
+        if schema is ArticleBodySchema:
+            return ArticleBodySchema(
                 blogger_html=(
                     "<p>" + "مقدمة " * 65 + "</p>"
                     "<h2>ما الذي حدث؟</h2><p>" + "تفصيل " * 65 + "</p>"
                     "<h2>لماذا يلفت الأمر الانتباه؟</h2><p>" + "سياق " * 65 + "</p>"
                     "<p>" + "خلاصة " * 65 + "</p>"
                 ),
+            )
+
+        if schema is EditorialMetadataSchema:
+            return EditorialMetadataSchema(
+                blogger_title="عنوان تجريبي",
                 seo_description="وصف",
                 labels=["غرائب"],
                 facebook_title="عنوان فيسبوك",
-                facebook_post=(
-                    "منشور فيسبوك طويل بما يكفي لإثارة الفضول "
-                    "دون كشف النهاية."
-                ),
+                facebook_post="منشور فيسبوك طويل بما يكفي لإثارة الفضول دون كشف النهاية.",
                 first_comment_hook="التفاصيل هنا",
                 article_scene_idea="a cozy street",
                 facebook_scene_idea="a market",
