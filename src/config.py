@@ -108,6 +108,9 @@ class Settings:
     gemini_api_key_2: str = ""
     gemini_api_key_3: str = ""
     image_api_key: str = ""
+    groq_api_key: str = ""
+    groq_model: str = "openai/gpt-oss-120b"
+    groq_vision_model: str = "qwen/qwen3.8-27b"
     llm_timeout: int = 180
 
     # --- image provider
@@ -257,6 +260,9 @@ class Settings:
             gemini_api_key_2=_str("GEMINI_API_KEY_2", "", env),
             gemini_api_key_3=_str("GEMINI_API_KEY_3", "", env),
             image_api_key=_str("IMAGE_API_KEY", "", env),
+            groq_api_key=_str("GROQ_API_KEY", "", env),
+            groq_model=_str("GROQ_MODEL", "openai/gpt-oss-120b", env),
+            groq_vision_model=_str("GROQ_VISION_MODEL", "qwen/qwen3.8-27b", env),
             llm_timeout=_int("LLM_TIMEOUT", 180, env),
             image_provider=_str("IMAGE_PROVIDER", "cloudflare", env),
             cloudflare_account_id=_str("CLOUDFLARE_ACCOUNT_ID", "", env),
@@ -344,8 +350,8 @@ class Settings:
     def validate(self, need_publish: bool = False) -> list[str]:
         problems: list[str] = []
 
-        if not any((self.gemini_api_key, self.gemini_api_key_2, self.gemini_api_key_3)):
-            problems.append("At least one of GEMINI_API_KEY_1, GEMINI_API_KEY_2, or GEMINI_API_KEY_3 is required")
+        if not any((self.gemini_api_key, self.gemini_api_key_2, self.gemini_api_key_3, self.groq_api_key)):
+            problems.append("Configure at least one Gemini API key or GROQ_API_KEY")
 
         try:
             ZoneInfo(self.day_timezone)
@@ -377,6 +383,11 @@ class Settings:
 
     def warnings(self, need_publish: bool = False) -> list[str]:
         out: list[str] = []
+
+        if not self.groq_api_key:
+            out.append("GROQ_API_KEY is missing; Groq-first tasks will fall back to Gemini.")
+        if not any((self.gemini_api_key, self.gemini_api_key_2, self.gemini_api_key_3)):
+            out.append("Gemini keys are missing; article writing will fall back to Groq.")
 
         if self.needs_images:
             if self.image_provider == "cloudflare" and not self.cloudflare_ready() and not self.image_required:
@@ -415,6 +426,7 @@ class Settings:
             self.gemini_api_key_2,
             self.gemini_api_key_3,
             self.image_api_key,
+            self.groq_api_key,
             self.cloudflare_account_id,
             self.cloudflare_api_token,
             self.google_client_id,
