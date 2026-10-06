@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from src.config import Settings
-from src.gemini_client import GeminiClient
+from src.gemini_client import GeminiClient, GeminiError
 from src.models import ImageCheckSchema
 
 
@@ -58,3 +58,34 @@ def test_gemini_rotates_to_next_key_after_rate_limit(monkeypatch):
     assert result.relevant_to_story is True
     assert [key for key, _ in calls] == ["key-one", "key-two", "key-three"]
     assert client._exhausted_keys == {0, 1}
+
+
+def test_gemini_falls_back_after_model_error_without_name_error(monkeypatch):
+    monkeypatch.setattr(
+        GeminiClient, "_make_client", staticmethod(lambda _key, _timeout: FakeClient("key-one", []))
+    )
+    cfg = Settings(
+        gemini_api_key="key-one",
+        gemini_model="gemini-primary",
+        gemini_fallback_model="gemini-fallback",
+        max_retries=0,
+    )
+    client = GeminiClient(cfg)
+    models = []
+
+    def fake_generate(model, _prompt, schema, **_kwargs):
+        models.append(model)
+        if model == "gemini-primary":
+            raise GeminiError("temporary 503")
+        return schema(
+            relevant_to_story=True,
+            contains_text_or_watermark=False,
+            obvious_defects=False,
+            reason="fallback succeeded",
+        )
+
+    monkeypatch.setattr(client, "_generate_json_model", fake_generate)
+    result = client.generate_json("check this image", ImageCheckSchema, tag="IMGCHECK")
+
+    assert result.relevant_to_story is True
+    assert models == ["gemini-primary", "gemini-fallback"]
