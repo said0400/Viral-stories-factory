@@ -66,7 +66,7 @@ jobs:
 
       PEOPLE_IMAGE_STYLE: ${{ vars.PEOPLE_IMAGE_STYLE || 'reference' }}
       IMAGE_REQUIRED: ${{ vars.IMAGE_REQUIRED || 'true' }}
-      FACEBOOK_IMAGE_MODE: ${{ vars.FACEBOOK_IMAGE_MODE || 'generated' }}
+      FACEBOOK_IMAGE_MODE: original
       FACEBOOK_LAYOUT: ${{ vars.FACEBOOK_LAYOUT || 'auto' }}
       FACEBOOK_SEPARATE_IMAGE: ${{ vars.FACEBOOK_SEPARATE_IMAGE || 'true' }}
 
@@ -81,7 +81,9 @@ jobs:
       IMAGE_LONG_SIDE: ${{ vars.IMAGE_LONG_SIDE || '1536' }}
       CLOUDFLARE_TIMEOUT: ${{ vars.CLOUDFLARE_TIMEOUT || '300' }}
 
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_API_KEY_1: ${{ secrets.GEMINI_API_KEY_1 || secrets.GEMINI_API_KEY }}
+      GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+      GEMINI_API_KEY_3: ${{ secrets.GEMINI_API_KEY_3 }}
       IMAGE_API_KEY: ${{ secrets.IMAGE_API_KEY }}
 
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
