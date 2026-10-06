@@ -89,9 +89,9 @@ class Settings:
     people_image_style: str = "reference"   # real source faces are retained where a reference exists
     image_mode: str = "faithful"            # faithful | creative  (article image)
     cinematic_style: str = DEFAULT_CINEMATIC_STYLE
-    facebook_image_mode: str = "generated"  # source photos are AI-restyled before composing
+    facebook_image_mode: str = "original"  # original article photos only; no AI image generation
     facebook_layout: str = "auto"           # auto | insets | diptychs | triptychs
-    facebook_separate_image: bool = True    # only used when facebook_image_mode=generated
+    facebook_separate_image: bool = True    # keep a dedicated original-photo Facebook composite
     image_vlm_check: bool = True
     image_required: bool = True
 
@@ -105,6 +105,8 @@ class Settings:
     gemini_content_fallbacks: str = DEFAULT_CONTENT_FALLBACKS  # comma separated
     gemini_image_model: str = "gemini-3.1-flash-lite-image"
     gemini_api_key: str = ""
+    gemini_api_key_2: str = ""
+    gemini_api_key_3: str = ""
     image_api_key: str = ""
     llm_timeout: int = 180
 
@@ -180,8 +182,9 @@ class Settings:
         mode = str(self.image_mode or "").strip().lower()
         put("image_mode", mode if mode in {"faithful", "creative"} else "faithful")
 
-        # Raw source-photo publishing is no longer the default or an accepted mode.
-        put("facebook_image_mode", "generated")
+        # Facebook is intentionally composed from original article pixels only.
+        put("facebook_image_mode", "original")
+        put("facebook_separate_image", True)
 
         layout = str(self.facebook_layout or "").strip().lower()
         allowed_layouts = {
@@ -239,7 +242,7 @@ class Settings:
             people_image_style=_str("PEOPLE_IMAGE_STYLE", "reference", env),
             image_mode=_str("IMAGE_MODE", "faithful", env),
             cinematic_style=_str("CINEMATIC_STYLE", DEFAULT_CINEMATIC_STYLE, env),
-            facebook_image_mode=_str("FACEBOOK_IMAGE_MODE", "generated", env),
+            facebook_image_mode=_str("FACEBOOK_IMAGE_MODE", "original", env),
             facebook_layout=_str("FACEBOOK_LAYOUT", "auto", env),
             facebook_separate_image=_bool("FACEBOOK_SEPARATE_IMAGE", True, env),
             image_vlm_check=_bool("IMAGE_VLM_CHECK", True, env),
@@ -250,7 +253,9 @@ class Settings:
             gemini_content_model=_str("GEMINI_CONTENT_MODEL", DEFAULT_CONTENT_MODEL, env),
             gemini_content_fallbacks=_str("GEMINI_CONTENT_FALLBACKS", DEFAULT_CONTENT_FALLBACKS, env),
             gemini_image_model=_str("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-lite-image", env),
-            gemini_api_key=_str("GEMINI_API_KEY", "", env),
+            gemini_api_key=_str("GEMINI_API_KEY_1", _str("GEMINI_API_KEY", "", env), env),
+            gemini_api_key_2=_str("GEMINI_API_KEY_2", "", env),
+            gemini_api_key_3=_str("GEMINI_API_KEY_3", "", env),
             image_api_key=_str("IMAGE_API_KEY", "", env),
             llm_timeout=_int("LLM_TIMEOUT", 180, env),
             image_provider=_str("IMAGE_PROVIDER", "cloudflare", env),
@@ -339,8 +344,8 @@ class Settings:
     def validate(self, need_publish: bool = False) -> list[str]:
         problems: list[str] = []
 
-        if not self.gemini_api_key:
-            problems.append("GEMINI_API_KEY is missing")
+        if not any((self.gemini_api_key, self.gemini_api_key_2, self.gemini_api_key_3)):
+            problems.append("At least one of GEMINI_API_KEY_1, GEMINI_API_KEY_2, or GEMINI_API_KEY_3 is required")
 
         try:
             ZoneInfo(self.day_timezone)
@@ -378,8 +383,8 @@ class Settings:
                 out.append("Cloudflare credentials are missing; images will be skipped (IMAGE_REQUIRED=false).")
 
             if self.image_provider == "gemini":
-                if not (self.image_api_key or self.gemini_api_key):
-                    out.append("No IMAGE_API_KEY or GEMINI_API_KEY; image generation will fail.")
+                if not (self.image_api_key or self.gemini_api_key or self.gemini_api_key_2 or self.gemini_api_key_3):
+                    out.append("No IMAGE_API_KEY or Gemini API key; image generation will fail.")
                 else:
                     out.append(
                         "IMAGE_PROVIDER=gemini: Gemini image models may require billing "
@@ -407,6 +412,8 @@ class Settings:
     def secret_values(self) -> list[str]:
         values = [
             self.gemini_api_key,
+            self.gemini_api_key_2,
+            self.gemini_api_key_3,
             self.image_api_key,
             self.cloudflare_account_id,
             self.cloudflare_api_token,
