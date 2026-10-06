@@ -146,40 +146,52 @@ def analyze_source_photos(
     *,
     limit: int = 3,
 ) -> list[SelectedPhoto]:
-    """Rank source photos and find story-specific focal boxes; preserve original embedded elements."""
+    """Rank source photos in vision-sized batches and find story-specific focal boxes."""
     if not photos:
         return []
 
     limit = max(1, min(int(limit), 3))
     excerpt = (article.article_text or article.description or "")[:1800]
-    prompt = (
-        f"ARTICLE TITLE: {article.original_title}\nARTICLE CONTEXT: {excerpt}\n\n"
-        f"You receive {len(photos)} ORIGINAL images from the article, numbered from 0 in the supplied order.\n"
-        "For each image return its index, relevance_score (0-100), visual_impact_score (0-100), "
-        "focus_center_x, focus_center_y, focus_width, focus_height (normalized 0-1000), and focal_description.\n"
-        "Rank highest the genuine source photos that best show the verified event or an important detail. "
-        "The focal rectangle should tightly include the important person/object/evidence, with enough surrounding context.\n"
-        "A photo may contain source-native captions, signs, interface elements, arrows, logos, watermarks, or a collage. "
-        "Do NOT treat those elements as a reason to reject or erase it; they are part of the source pixels and may be important.\n"
-        "Do not identify people, infer unsupported facts, or ask for image generation/editing. Analyze only visible content. "
-        "Return one item for every supplied image."
-    )
-
-    response: PhotoAssessmentBatch | None = None
-    try:
-        response = gem.generate_json(
-            prompt,
-            PhotoAssessmentBatch,
-            images=[(_jpeg(p), "image/jpeg") for p in photos],
-            temperature=0.0,
-            tag="PHOTO_ANALYSIS",
+    verdicts: dict[int, PhotoAssessmentSchema] = {}
+    for start in range(0, len(photos), 3):
+        batch = photos[start : start + 3]
+        end = start + len(batch)
+        global_indices = list(range(start, end))
+        prompt = (
+            f"ARTICLE TITLE: {article.original_title}\nARTICLE CONTEXT: {excerpt}\n\n"
+            f"You receive {len(batch)} ORIGINAL article images in order for global indices {global_indices}.\n"
+            "Return each image's global index, relevance_score (0-100), visual_impact_score (0-100), "
+            "focus_center_x, focus_center_y, focus_width, focus_height (normalized 0-1000), and focal_description.\n"
+            "Rank highest the genuine source photos that best show the verified event or an important detail. "
+            "The focal rectangle should include the important person/object/evidence and enough context.\n"
+            "Source-native captions, signs, interface elements, arrows, logos, watermarks, and collage panels "
+            "are part of the original; do not erase or reject them. Analyze visible content only. "
+            "Do not identify people, infer unsupported facts, or request image generation/editing."
         )
-    except GeminiError as exc:
-        logger.warn("PHOTO", f"source-photo analysis unavailable ({str(exc)[:120]}); using article order and center crops")
-    except Exception as exc:
-        logger.warn("PHOTO", f"source-photo analysis error ({type(exc).__name__}); using article order and center crops")
+        try:
+            response = gem.generate_json(
+                prompt,
+                PhotoAssessmentBatch,
+                images=[(_jpeg(p), "image/jpeg") for p in batch],
+                temperature=0.1,
+                tag="PHOTO_ANALYSIS",
+            )
+            for verdict in response.items:
+                idx = int(verdict.index)
+                # Accept explicit global indices; also normalize local indices for compatible providers.
+                if start <= idx < end:
+                    global_index = idx
+                elif 0 <= idx < len(batch):
+                    global_index = start + idx
+                else:
+                    continue
+                verdicts[global_index] = verdict
+        except Exception as exc:
+            logger.warn(
+                "PHOTO",
+                f"source-photo batch {start // 3 + 1} analysis failed ({type(exc).__name__}); using center crops for that batch",
+            )
 
-    verdicts = {v.index: v for v in (response.items if response else []) if 0 <= v.index < len(photos)}
     ranked: list[tuple[float, int, SelectedPhoto]] = []
     for i, photo in enumerate(photos):
         v = verdicts.get(i)
