@@ -9,8 +9,19 @@ from src.config import Settings
 from src.facebook import FacebookError, build_package
 from src.history import History
 from src.image_generator import REALISTIC_NEWS_STYLE, build_prompt, choose_strategy, validate_image
-from src.models import GeneratedContent, SourceArticle, StoryState, VisualAnalysis
-from src.photo_composer import compose_square
+from src.models import (
+    GeneratedContent,
+    SourceArticle,
+    StoryState,
+    VisualAnalysis,
+)
+from src.photo_composer import (
+    PhotoAssessmentBatch,
+    PhotoAssessmentSchema,
+    analyze_source_photos,
+    compose_original_square,
+    compose_square,
+)
 from src.twilio_whatsapp import _chunks
 from src.utils import make_story_id, normalize_url, parse_datetime, title_similarity
 from src.visual_analyzer import ahash, hamming
@@ -236,6 +247,58 @@ def test_facebook_composition_templates_are_square_and_text_free():
         canvas, used = compose_square(photos[:expected_count], layout)
         assert canvas.size == (1080, 1080)
         assert used == expected_count
+
+
+def test_original_photo_analysis_selects_and_enlarges_story_focus():
+    now = datetime.now(timezone.utc)
+    article = SourceArticle(
+        source_name="Example",
+        original_title="A story with a distinctive object",
+        original_url="https://example.com/story",
+        normalized_url="https://example.com/story",
+        discovered_at=now,
+        description="A person shows an important object.",
+        article_text="The article describes the object and the event.",
+    )
+    photos = [Image.new("RGB", (800, 600), (20, 40, 220)), Image.new("RGB", (800, 600), (220, 30, 20))]
+
+    class FakePhotoGemini:
+        def generate_json(self, prompt, schema, **kwargs):
+            assert schema is PhotoAssessmentBatch
+            assert len(kwargs["images"]) == 2
+            return PhotoAssessmentBatch(
+                items=[
+                    PhotoAssessmentSchema(
+                        index=0,
+                        relevance_score=35,
+                        visual_impact_score=40,
+                        focus_center_x=500,
+                        focus_center_y=500,
+                        focus_width=300,
+                        focus_height=300,
+                        focal_description="background",
+                    ),
+                    PhotoAssessmentSchema(
+                        index=1,
+                        relevance_score=95,
+                        visual_impact_score=90,
+                        focus_center_x=700,
+                        focus_center_y=300,
+                        focus_width=200,
+                        focus_height=200,
+                        focal_description="important object",
+                    ),
+                ]
+            )
+
+    selected = analyze_source_photos(FakePhotoGemini(), article, photos, limit=2)
+    assert selected[0].image is photos[1]
+    assert selected[0].focus_box == (600, 200, 800, 400)
+
+    canvas, used = compose_original_square(selected, "INSET_CIRCLE_RIGHT")
+    assert canvas.size == (1080, 1080)
+    assert used == 2
+    assert canvas.getpixel((540, 900)) == (220, 30, 20)
 
 
 def _img(color, noise=False):
