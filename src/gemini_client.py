@@ -48,19 +48,37 @@ class ImageQuotaError(ImageGenError):
     """The image provider has no quota left (retrying is pointless)."""
 
 
+class GeminiKeyError(GeminiError):
+    """The active Gemini API key is rate-limited, out of quota, or rejected."""
+
+
 class GeminiClient:
     def __init__(self, cfg: Settings) -> None:
         self.cfg = cfg
         self._client: Any = None
         self._image_client: Any = None
-        self._exhausted: set[str] = set()   # models whose quota is gone for this run
+        self._image_client_api_key = ""
+        self._api_keys: list[tuple[str, str]] = []
+        self._exhausted_keys: set[int] = set()
+        self._exhausted_image_keys: set[str] = set()
+        self._active_key_index: int | None = None
 
-        if cfg.gemini_api_key:
+        for label, value in (
+            ("GEMINI_API_KEY_1", cfg.gemini_api_key),
+            ("GEMINI_API_KEY_2", cfg.gemini_api_key_2),
+            ("GEMINI_API_KEY_3", cfg.gemini_api_key_3),
+        ):
+            value = str(value or "").strip()
+            if value and all(existing != value for _, existing in self._api_keys):
+                self._api_keys.append((label, value))
+
+        for index in range(len(self._api_keys)):
             try:
-                self._client = self._make_client(cfg.gemini_api_key, cfg.llm_timeout)
+                self._activate_key(index)
+                break
             except Exception as exc:
-                logger.error("GEMINI", f"Failed to initialise google-genai client ({type(exc).__name__})")
-                self._client = None
+                self._exhausted_keys.add(index)
+                logger.error("GEMINI", f"Failed to initialise {self._api_keys[index][0]} client ({type(exc).__name__})")
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -75,13 +93,58 @@ class GeminiClient:
             return genai.Client(api_key=api_key)
 
     def is_configured(self) -> bool:
-        return self._client is not None
+        return self._client is not None and bool(self._api_keys)
+
+    def _activate_key(self, index: int) -> None:
+        if not 0 <= index < len(self._api_keys):
+            raise GeminiError("Gemini API key index is invalid")
+        if self._active_key_index == index and self._client is not None:
+            return
+
+        _label, value = self._api_keys[index]
+        self._client = self._make_client(value, self.cfg.llm_timeout)
+        self._active_key_index = index
+        # If IMAGE_API_KEY is absent, image calls use the active Gemini key too.
+        self._image_client = None
+        self._image_client_api_key = ""
+
+    def _available_key_indices(self) -> list[int]:
+        return [i for i in range(len(self._api_keys)) if i not in self._exhausted_keys]
+
+    def _active_key_label(self) -> str:
+        if self._active_key_index is None:
+            return "Gemini key"
+        return self._api_keys[self._active_key_index][0]
 
     @staticmethod
     def _is_quota_exhausted(exc: BaseException) -> bool:
-        """Zero quota (limit: 0) or an exhausted daily quota: retrying cannot help."""
+        """Recognize quota/resource-exhaustion responses that should move to another key."""
         low = str(exc).lower()
-        return "limit: 0" in low or "perday" in low
+        return any(word in low for word in ("limit: 0", "perday", "quota exceeded", "resource_exhausted"))
+
+    @classmethod
+    def _key_unavailable(cls, exc: BaseException) -> bool:
+        if cls._is_quota_exhausted(exc):
+            return True
+        for attr in ("code", "status_code"):
+            try:
+                if int(getattr(exc, attr, 0)) in {401, 403, 429}:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        low = str(exc).lower()
+        return any(
+            phrase in low
+            for phrase in (
+                "invalid api key",
+                "api key not valid",
+                "api_key_invalid",
+                "rate limit",
+                "too many requests",
+                "resource exhausted",
+                "quota exceeded",
+            )
+        )
 
     @classmethod
     def _retryable(cls, exc: BaseException) -> bool:
@@ -162,7 +225,7 @@ class GeminiClient:
         max_attempts: int | None = None,
     ) -> T:
         if not self._client:
-            raise GeminiError("Gemini client is not configured (missing GEMINI_API_KEY)")
+            raise GeminiError("Gemini client is not configured (missing Gemini API keys)")
 
         from google.genai import types
 
@@ -202,14 +265,16 @@ class GeminiClient:
                     model=model, contents=contents, config=config
                 )
             except Exception as exc:
-                if self._is_quota_exhausted(exc):
-                    self._exhausted.add(model)
+                if self._key_unavailable(exc):
+                    if self._active_key_index is not None:
+                        self._exhausted_keys.add(self._active_key_index)
                     logger.warn(
                         tag,
-                        f"{model}: quota exhausted (limit 0 or daily cap); "
-                        "skipping this model for the rest of the run",
+                        f"{self._active_key_label()} is unavailable for this run; moving to the next configured key",
                     )
-                    raise GeminiError(f"quota exhausted on {model}") from exc
+                    raise GeminiKeyError(
+                        f"{model} rejected the active key due to quota, rate limit, or authentication"
+                    ) from exc
 
                 if attempt < attempts and self._retryable(exc):
                     delay = delays[attempt - 1]
@@ -250,49 +315,67 @@ class GeminiClient:
         tag: str = "GEMINI",
     ) -> T:
         """Structured output validated against a Pydantic schema, walking the model chain for `tag`."""
-        models = [m for m in self._model_chain(tag) if m not in self._exhausted]
-
-        if not models:
-            raise GeminiError("All configured Gemini models have exhausted their quota")
+        models = self._model_chain(tag)
+        key_indices = self._available_key_indices()
+        if not key_indices:
+            raise GeminiError("All configured Gemini API keys are unavailable or exhausted")
 
         last: GeminiError | None = None
-
-        for index, name in enumerate(models):
-            is_last = index == len(models) - 1
-
+        for key_index in key_indices:
             try:
-                result = self._generate_json_model(
-                    name,
-                    prompt,
-                    schema,
-                    images=images,
-                    system=system,
-                    temperature=temperature,
-                    tag=tag,
-                    max_attempts=None if is_last else _ATTEMPTS_BEFORE_FALLBACK,
-                )
-                logger.log(tag, f"model used: {name}")
-                return result
+                self._activate_key(key_index)
+            except Exception as exc:
+                self._exhausted_keys.add(key_index)
+                last = GeminiError(f"Could not initialize {self._api_keys[key_index][0]}")
+                logger.warn(tag, f"{self._api_keys[key_index][0]} could not be initialized; trying the next key")
+                continue
 
-            except GeminiError as exc:
-                last = exc
-                if not is_last:
-                    logger.warn(tag, f"Model '{name}' failed ({str(exc)[:200]}). Falling back to '{models[index + 1]}'")
-                    continue
-                raise
+            key_limited = False
+            for index, name in enumerate(models):
+                is_last = index == len(models) - 1
+                try:
+                    result = self._generate_json_model(
+                        name,
+                        prompt,
+                        schema,
+                        images=images,
+                        system=system,
+                        temperature=temperature,
+                        tag=tag,
+                        max_attempts=None if is_last else _ATTEMPTS_BEFORE_FALLBACK,
+                    )
+                    logger.log(tag, f"model used: {name}; key slot={key_index + 1}")
+                    return result
+                except GeminiKeyError as exc:
+                    last = exc
+                    key_limited = True
+                    break
+                except GeminiError as exc:
+                    last = exc
+                    if not is_last:
+                        logger.warn(
+                            tag,
+                            f"Model '{name}' failed ({str(exc)[:200]}). Falling back to '{models[index + 1]}'",
+                        )
+                        continue
+                    raise
 
-        raise last or GeminiError("Gemini JSON generation failed across all models")
+            if key_limited:
+                continue
+
+        raise GeminiError("Gemini generation failed across all available API keys") from last
 
     # ------------------------------------------------------------------
     # Image generation (IMAGE_PROVIDER=gemini only)
-    def _get_image_client(self) -> Any:
-        if self._image_client is None:
-            key = self.cfg.image_api_key or self.cfg.gemini_api_key
-            try:
-                self._image_client = self._make_client(key, self.cfg.image_request_timeout)
-            except Exception as exc:
-                logger.warn("GEMINI_IMAGE", f"image client init failed ({type(exc).__name__}); using primary client")
-                self._image_client = self._client
+    def _get_image_client(self, api_key: str = "") -> Any:
+        key = api_key or self.cfg.image_api_key
+        if not key and self._active_key_index is not None:
+            key = self._api_keys[self._active_key_index][1]
+        if not key:
+            raise ImageGenError("No Gemini API key is configured for image generation")
+        if self._image_client is None or self._image_client_api_key != key:
+            self._image_client = self._make_client(key, self.cfg.image_request_timeout)
+            self._image_client_api_key = key
         return self._image_client
 
     @staticmethod
@@ -353,8 +436,8 @@ class GeminiClient:
         tag: str = "GEMINI_IMAGE",
     ) -> tuple[bytes, str]:
         """Return (image_bytes, mime_type). Raises ImageQuotaError / ImageGenError."""
-        if not self._client:
-            raise ImageGenError("Gemini client is not configured")
+        if not self._api_keys and not self.cfg.image_api_key:
+            raise ImageGenError("Gemini client is not configured (missing Gemini API keys)")
 
         model = (self.cfg.gemini_image_model or "").strip()
 
@@ -364,35 +447,61 @@ class GeminiClient:
         if "imagen" in model.lower():
             raise ImageGenError("Imagen models are not supported by the Gemini Developer API; use a gemini-*-image model")
 
-        client = self._get_image_client()
+        key_options: list[tuple[str, str]] = []
+        if self.cfg.image_api_key:
+            key_options.append(("IMAGE_API_KEY", self.cfg.image_api_key))
+        key_options.extend(self._api_keys)
+        unique: list[tuple[str, str]] = []
+        for label, key in key_options:
+            if key and all(existing[1] != key for existing in unique):
+                unique.append((label, key))
+        available = [(label, key) for label, key in unique if label not in self._exhausted_image_keys]
+        if not available:
+            raise ImageQuotaError("All configured Gemini image API keys are unavailable or exhausted")
 
         delays = self._delays()
         attempts = len(delays) + 1
         last: Exception | None = None
+        key_limited = False
 
-        for attempt in range(1, attempts + 1):
+        for label, key in available:
+            key_limited = False
             try:
-                logger.log(tag, f"Calling generate_content on {model} (attempt {attempt}/{attempts})")
-                return self._gemini_image(client, model, prompt, references, aspect_ratio)
-
+                client = self._get_image_client(key)
             except Exception as exc:
                 last = exc
+                self._exhausted_image_keys.add(label)
+                logger.warn(tag, f"{label} image client could not be initialized; trying the next key")
+                continue
 
-                if self._is_quota_exhausted(exc):
-                    raise ImageQuotaError(
-                        f"No usable quota for {model} (limit 0 or daily quota exhausted); billing may be required"
-                    ) from exc
+            for attempt in range(1, attempts + 1):
+                try:
+                    logger.log(tag, f"Calling generate_content on {model} using {label} (attempt {attempt}/{attempts})")
+                    return self._gemini_image(client, model, prompt, references, aspect_ratio)
 
-                if attempt < attempts and self._retryable(exc):
-                    delay = delays[attempt - 1]
-                    logger.warn(
-                        tag,
-                        f"Transient image error on {model} (attempt {attempt}/{attempts}), "
-                        f"retrying in {delay}s: {str(exc)[:200]}",
-                    )
-                    time.sleep(delay)
-                    continue
+                except Exception as exc:
+                    last = exc
+                    if self._key_unavailable(exc):
+                        self._exhausted_image_keys.add(label)
+                        key_limited = True
+                        logger.warn(tag, f"{label} is out of quota, rate-limited, or rejected; trying the next key")
+                        break
 
+                    if attempt < attempts and self._retryable(exc):
+                        delay = delays[attempt - 1]
+                        logger.warn(
+                            tag,
+                            f"Transient image error on {model} (attempt {attempt}/{attempts}), "
+                            f"retrying in {delay}s: {str(exc)[:200]}",
+                        )
+                        time.sleep(delay)
+                        continue
+
+                    break
+
+            if not key_limited:
                 break
 
+        if key_limited or (last is not None and self._key_unavailable(last)):
+            raise ImageQuotaError("No configured Gemini image key has usable quota") from last
         raise ImageGenError(f"Image generation failed on {model}: {last}") from last
