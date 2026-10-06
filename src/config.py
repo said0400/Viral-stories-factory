@@ -9,12 +9,13 @@ from typing import Mapping
 from zoneinfo import ZoneInfo
 
 DEFAULT_EXPORTS_DIR = "data/exports"
-DEFAULT_CF_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b"
+DEFAULT_CF_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev"
 DEFAULT_CONTENT_MODEL = "gemini-3.8-flash"
 DEFAULT_CONTENT_FALLBACKS = "gemini-3.6-flash,gemini-3.5-flash,gemini-2.5-flash"
 DEFAULT_CINEMATIC_STYLE = (
-    "dramatic cinematic film still, moody high-contrast lighting, teal and orange color grading, "
-    "shallow depth of field, subtle film grain, rich atmospheric tones"
+    "premium editorial photojournalism, clear natural directional light, crisp subject detail, "
+    "realistic skin and textures, balanced exposure, rich but natural color, clean contrast, "
+    "sharp eyes and decisive focal point, uncluttered background, no haze, no heavy grain"
 )
 
 
@@ -113,6 +114,8 @@ class Settings:
     cloudflare_api_token: str = ""
     cloudflare_image_model: str = DEFAULT_CF_IMAGE_MODEL
     cloudflare_timeout: int = 300
+    cloudflare_image_steps: int = 25
+    image_long_side: int = 1536
 
     # --- network
     request_timeout: int = 60
@@ -165,6 +168,8 @@ class Settings:
         put("request_timeout", int(_clamp(int(self.request_timeout), 5, 300)))
         put("image_request_timeout", int(_clamp(int(self.image_request_timeout), 10, 900)))
         put("cloudflare_timeout", int(_clamp(int(self.cloudflare_timeout), 30, 900)))
+        put("cloudflare_image_steps", int(_clamp(int(self.cloudflare_image_steps), 1, 50)))
+        put("image_long_side", int(_clamp(int(self.image_long_side), 1024, 1920)))
         put("max_retries", int(_clamp(int(self.max_retries), 0, 10)))
         put("per_host_delay_seconds", float(_clamp(float(self.per_host_delay_seconds), 0.0, 60.0)))
 
@@ -253,6 +258,8 @@ class Settings:
             cloudflare_api_token=_str("CLOUDFLARE_API_TOKEN", "", env),
             cloudflare_image_model=_str("CLOUDFLARE_IMAGE_MODEL", DEFAULT_CF_IMAGE_MODEL, env),
             cloudflare_timeout=_int("CLOUDFLARE_TIMEOUT", 300, env),
+            cloudflare_image_steps=_int("CLOUDFLARE_IMAGE_STEPS", 25, env),
+            image_long_side=_int("IMAGE_LONG_SIDE", 1536, env),
             request_timeout=_int("REQUEST_TIMEOUT", 60, env),
             image_request_timeout=_int("IMAGE_REQUEST_TIMEOUT", 180, env),
             max_retries=_int("MAX_RETRIES", 3, env),
