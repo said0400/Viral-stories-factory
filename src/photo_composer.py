@@ -291,3 +291,131 @@ def compose(photos: list[Image.Image], layout: str = "auto") -> tuple[Image.Imag
     canvas.paste(_cover(partner, (width, bottom_h)), (0, top_h + GAP))
 
     return canvas, 2
+
+
+# ------------------------------------------------------------------ square AI-image layouts
+SQUARE_SIDE = 1080
+SQUARE_LAYOUTS = {
+    "auto",
+    "single_hero",
+    "inset_circle_right",
+    "inset_circle_left",
+    "inset_square_right",
+    "inset_square_left",
+    "diptych_split",
+    "diptych_stack",
+    "triptych",
+    "triptych_bottom",
+}
+
+
+def to_reference(img: Image.Image, max_side: int = 1280) -> tuple[bytes, str]:
+    """Encode a downloaded source photo for an image model reference input."""
+    return _jpeg(img, max_side=max_side), "image/jpeg"
+
+
+def _square_cover(img: Image.Image, size: tuple[int, int], bias: float = 0.22) -> Image.Image:
+    return _cover(img.convert("RGB"), size, bias=bias)
+
+
+def _paste_square_inset(
+    canvas: Image.Image,
+    detail: Image.Image,
+    *,
+    side: str,
+    shape: str,
+) -> None:
+    diameter = 350
+    margin = 42
+    x = margin if side == "left" else SQUARE_SIDE - diameter - margin
+    y = margin
+    detail = _square_cover(detail, (diameter, diameter), bias=0.18)
+
+    if shape == "circle":
+        _paste_circle(canvas, detail, (x, y), diameter, ring=9)
+        return
+
+    border = 9
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle(
+        (x - border, y - border, x + diameter + border, y + diameter + border),
+        fill=(245, 245, 245),
+    )
+    canvas.paste(detail, (x, y))
+
+
+def compose_square(photos: list[Image.Image], layout: str = "auto") -> tuple[Image.Image, int]:
+    """Compose two or three generated/reference-matched photos on a 1080×1080 canvas.
+
+    No text is rendered. ``triptych`` places one portrait panel beside two stacked
+    panels; ``triptych_bottom`` places two square panels above a wide lower panel.
+    Unknown layouts and incomplete three-photo layouts degrade gracefully.
+    """
+    if not photos:
+        raise ValueError("no photos to compose")
+
+    normalized = str(layout or "auto").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized not in SQUARE_LAYOUTS:
+        normalized = "auto"
+
+    side = SQUARE_SIDE
+    gap = 8
+    bg = Image.new("RGB", (side, side), BACKGROUND)
+    count = len(photos)
+
+    if normalized == "auto":
+        normalized = "triptych" if count >= 3 else "inset_circle_right" if count >= 2 else "single_hero"
+
+    if normalized == "single_hero" or count == 1:
+        return _square_cover(photos[0], (side, side)), 1
+
+    if normalized.startswith("inset_"):
+        canvas = _square_cover(photos[0], (side, side))
+        shape = "circle" if "circle" in normalized else "square"
+        inset_side = "left" if normalized.endswith("_left") else "right"
+        _paste_square_inset(canvas, photos[1], side=inset_side, shape=shape)
+        return canvas, 2
+
+    if normalized == "diptych_split":
+        left_w = (side - gap) // 2
+        right_w = side - gap - left_w
+        bg.paste(_square_cover(photos[0], (left_w, side)), (0, 0))
+        bg.paste(_square_cover(photos[1], (right_w, side)), (left_w + gap, 0))
+        return bg, 2
+
+    if normalized == "diptych_stack":
+        top_h = (side - gap) // 2
+        bottom_h = side - gap - top_h
+        bg.paste(_square_cover(photos[0], (side, top_h)), (0, 0))
+        bg.paste(_square_cover(photos[1], (side, bottom_h)), (0, top_h + gap))
+        return bg, 2
+
+    if count < 3:
+        # A triptych needs three distinct photos; a two-photo inset is less destructive.
+        fallback = "inset_circle_right"
+        canvas = _square_cover(photos[0], (side, side))
+        _paste_square_inset(canvas, photos[1], side="right", shape="circle")
+        logger.warn("PHOTO", f"{normalized} needs three images; used {fallback}")
+        return canvas, 2
+
+    if normalized == "triptych_bottom":
+        top_h = (side - gap) // 2
+        lower_h = side - gap - top_h
+        left_w = (side - gap) // 2
+        right_w = side - gap - left_w
+        bg.paste(_square_cover(photos[0], (left_w, top_h)), (0, 0))
+        bg.paste(_square_cover(photos[1], (right_w, top_h)), (left_w + gap, 0))
+        bg.paste(_square_cover(photos[2], (side, lower_h)), (0, top_h + gap))
+        return bg, 3
+
+    # Main vertical frame on the left; two secondary near-square frames on the right.
+    main_w = 610
+    secondary_w = side - main_w - gap
+    secondary_h = (side - gap) // 2
+    bg.paste(_square_cover(photos[0], (main_w, side)), (0, 0))
+    bg.paste(_square_cover(photos[1], (secondary_w, secondary_h)), (main_w + gap, 0))
+    bg.paste(
+        _square_cover(photos[2], (secondary_w, side - gap - secondary_h)),
+        (main_w + gap, secondary_h + gap),
+    )
+    return bg, 3
