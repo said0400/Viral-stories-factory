@@ -3,8 +3,8 @@
 IMAGE_MODE=faithful (default): re-render the SOURCE photo as a cinematic version of the same scene.
 IMAGE_MODE=creative: reference-aware editorial photojournalism.
 
-FACEBOOK_IMAGE_MODE=photo: real screened photos or dynamic composite AI-generated photo.
-Facebook generated images construct professional split-panel or circular inset compositions.
+Facebook uses source photos as references for newly generated high-resolution panels,
+then composes a square, text-free image using a story-specific layout.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from .utils import PoliteFetcher, sha256_hex
 from .visual_analyzer import ahash, hamming
 
 ARTICLE_ASPECT = "16:9"
-FACEBOOK_ASPECT = "1:1"    # used only by the generated (fallback) Facebook image
+FACEBOOK_ASPECT = "1:1"    # all Facebook panels and final composites are square
 
 FAITHFUL = "faithful_restyle"
 
@@ -142,21 +142,40 @@ def choose_strategy(v: VisualAnalysis, has_ref: bool, people_style: str) -> tupl
     return "editorial", REALISTIC_NEWS_STYLE
 
 
-def _faithful_prompt(style_text: str, aspect: str, simple: bool) -> str:
+def _faithful_prompt(
+    style_text: str,
+    aspect: str,
+    simple: bool,
+    title: str = "",
+    scene_idea: str = "",
+) -> str:
     parts = [
-        f"Square 1:1 aspect ratio press photograph." if aspect == "1:1" else f"Aspect ratio {aspect}.",
-        "The attached image is the SOURCE PHOTOGRAPH.",
-        "Re-render it as an authentic press news photograph of the EXACT same scene.",
-        "Keep exactly the same subjects, the same number of people, the same faces, expressions, poses, clothing, objects, setting, and framing.",
-        "Do not add, remove, replace or invent any person, animal, object or factual detail.",
-        "Preserve legible, story-relevant signs or labels already present in the source; do not invent, rewrite or add lettering.",
-        f"Change only the visual treatment: {style_text}.",
-        "Authentic press news photograph look. Not a cartoon, not an illustration, not a painting, no graphics.",
-        "No added headline, caption, watermark, logo, arrow, overlay, or artificial graphic border.",
+        f"Create a premium, high-resolution square 1:1 editorial photograph." if aspect == "1:1" else f"Create a premium, high-resolution {aspect} editorial hero photograph.",
+        "The attached image is the SOURCE PHOTOGRAPH and the only authority for the real people and factual scene.",
+        "Create a polished, believable editorial photojournalism image of the SAME verified moment, not a literal low-quality copy.",
+        "Preserve each real person's recognizable identity, apparent age, face, expression, pose, hair, clothing, and all story-critical objects and setting.",
+        "You MAY improve camera framing, crop, perspective, exposure, lighting, focus, and tonal balance to make the image more compelling and legible.",
+        "Make the main person or subject large and immediately recognizable; keep eyes, faces, and story-critical details tack sharp.",
+        "Use a clean, uncluttered composition with clear foreground/background separation, rich but natural color, realistic skin texture, balanced highlights and shadows, and professional lens rendering.",
+        "Do not copy blur, low resolution, compression artifacts, dull exposure, or awkward cropping from the source.",
+        "Do not add, remove, replace, or invent people, objects, events, or factual details; do not change who did what.",
+        "Preserve legible, story-relevant physical signs already present in the source if possible; never invent or rewrite lettering.",
+        f"Visual treatment: {style_text}.",
+        "No text overlays, headlines, captions, watermarks, logos, arrows, decorative borders, collages, or graphic frames.",
     ]
 
+    if title:
+        parts.append(f"Editorial subject context (do not render as text): {title}.")
+    if scene_idea:
+        parts.append(f"Factual scene brief, subordinate to the reference photo: {scene_idea}.")
+
+    if aspect == "1:1":
+        parts.append("Use a bold mobile-first crop with one obvious focal subject; keep the subject clear even at small feed size.")
+    else:
+        parts.append("Use a strong horizontal hero composition with enough scene context, while keeping the main subject prominent and readable.")
+
     if not simple:
-        parts.append("Avoid: " + NEGATIVE_FAITHFUL + ".")
+        parts.append("Avoid: " + NEGATIVE_FAITHFUL + ", tiny distant subjects, excessive shallow-focus blur, fog, heavy grain, muddy shadows, blown highlights, flat frontal lighting, plastic skin, awkward crop, busy background, unbalanced composition.")
 
     return " ".join(parts)
 
@@ -174,7 +193,7 @@ def build_prompt(
 ) -> str:
     """Build structural prompt based on exact prompt templates."""
     if strategy == FAITHFUL:
-        return _faithful_prompt(style, aspect, simple)
+        return _faithful_prompt(style, aspect, simple, title=title, scene_idea=scene_idea)
 
     comp = str(composition_type or "SINGLE_HERO").upper()
 
@@ -195,9 +214,9 @@ def build_prompt(
 
     base = [
         f"Square 1:1 authentic press news photograph for a story titled: '{title}'." if aspect == "1:1" else f"Aspect ratio {aspect} authentic press news photograph.",
-        "CAMERA & STYLE: Shot on 35mm DSLR camera, raw unedited press photojournalism, authentic natural lighting, real human textures, zero digital editing, zero CGI.",
+        "CAMERA & STYLE: premium editorial photojournalism captured on a professional full-frame camera; tack-sharp focal subject, natural directional light, balanced exposure, authentic skin and material texture, controlled contrast, high detail, believable photographic depth.",
         "NO ADDED GRAPHICS: no headlines, captions, watermarks, logos, arrows, or artificial frames; preserve only legible story-relevant lettering already in the supplied reference.",
-        f"SCENE DESCRIPTION: {scene_idea}.",
+        f"SCENE DESCRIPTION: {scene_idea}. Make the main story subject prominent, visually distinct, and easy to understand at phone-feed size.",
     ]
 
     subject_type = getattr(v, "subject_type", None) or "other"
@@ -287,7 +306,7 @@ def validate_image(
     except Exception:
         return False, "cannot open/corrupt", None
 
-    if min(img.size) < 400:
+    if min(img.size) < 512:
         return False, f"too small {img.size}", None
 
     stat = ImageStat.Stat(img.convert("L"))
@@ -309,7 +328,7 @@ def validate_image(
 
 def _save_jpeg(img: Image.Image, path: Path) -> tuple[str, str]:
     img = img.convert("RGB")
-    img.thumbnail((1600, 1600))
+    img.thumbnail((1920, 1920))
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -336,10 +355,12 @@ def vlm_check(gem: GeminiClient, jpeg: bytes, title: str, summary: str) -> tuple
             (
                 f"Story: {title}\n{summary}\n\n"
                 "Evaluate ONLY the supplied image against the story for news publishing:\n"
-                "1. Is the image relevant to the story?\n"
-                "2. Is it COMPLETELY FREE of visible text, captions, watermarks, logos, or artificial graphic overlays/borders?\n"
-                "3. Does it look like a realistic photograph (not an obvious cartoon, 3D render, artwork, or illustration)?\n"
-                "4. Is it free of obvious visual defects such as deformed hands, extra limbs, or severe rendering artifacts?"
+                "1. Is the image clearly relevant to the story?\n"
+                "2. Is it free of added text, captions, watermarks, logos, and artificial graphic overlays?\n"
+                "3. Is the main subject large, immediately recognizable, well-framed, and in crisp focus?\n"
+                "4. Does the exposure, lighting, color, and background look polished enough for a professional news/social feed?\n"
+                "5. Reject if the subject is tiny, soft/blurry, poorly cropped, muddy, badly lit, or visibly low-resolution.\n"
+                "6. Reject obvious anatomy defects, extra limbs, severe rendering artifacts, cartoons, or CGI."
             ),
             ImageCheckSchema,
             images=[(jpeg, "image/jpeg")],
@@ -378,7 +399,7 @@ def fidelity_check(
                 "Judge ONLY whether Image 2 is a faithful restyle of Image 1.\n"
                 "relevant_to_story = true when Image 2 shows the same scene as Image 1.\n"
                 f"{text_rule}\n"
-                "obvious_defects = true only for clearly deformed faces, hands or anatomy.\n"
+                "obvious_defects = true for deformed faces/hands/anatomy OR a blurred, poorly exposed, badly cropped, low-detail, or amateur-looking result.\n"
                 "Keep reason to one short sentence."
             ),
             ImageCheckSchema,
