@@ -16,6 +16,15 @@ T = TypeVar("T", bound=BaseModel)
 GROQ_API_BASE_URL = "https://api.groq.com/openai/v1"
 RETRYABLE_HTTP_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 MAX_ATTEMPTS = 2
+MAX_COMPLETION_TOKENS_BY_TAG = {
+    "ARTICLE": 4096,
+    "TRIAGE": 4096,
+    "METADATA": 2048,
+    "FACTCHECK": 1024,
+    "IMGCHECK": 512,
+    "VISUAL": 1024,
+}
+DEFAULT_MAX_COMPLETION_TOKENS = 2048
 
 
 class GroqError(Exception):
@@ -27,10 +36,12 @@ class GroqError(Exception):
         *,
         status_code: int | None = None,
         retryable: bool = False,
+        error_code: str = "",
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
+        self.error_code = error_code
 
 
 class GroqClient:
@@ -66,10 +77,21 @@ class GroqClient:
         suffix = f" code={code}" if code else ""
         if detail:
             suffix += f": {self._safe(detail)}"
+        lower_detail = detail.lower()
+        retryable_tpm_limit = (
+            status == 413
+            and code.lower() == "rate_limit_exceeded"
+            and "tokens per minute" in lower_detail
+        )
         return GroqError(
             f"Groq returned HTTP {status}{suffix} for {tag}",
             status_code=status,
-            retryable=status in RETRYABLE_HTTP_STATUS,
+            retryable=(
+                status in RETRYABLE_HTTP_STATUS
+                or code.lower() == "json_validate_failed"
+                or retryable_tpm_limit
+            ),
+            error_code=code,
         )
 
     @staticmethod
@@ -195,7 +217,9 @@ class GroqClient:
                 "model": model,
                 "messages": messages,
                 "temperature": temperature_value,
-                "max_completion_tokens": 8192,
+                "max_completion_tokens": MAX_COMPLETION_TOKENS_BY_TAG.get(
+                    tag.upper(), DEFAULT_MAX_COMPLETION_TOKENS
+                ),
                 "response_format": {"type": "json_object"},
                 "stream": False,
             }
@@ -222,9 +246,17 @@ class GroqClient:
                     last_error = exc
                     if attempt < MAX_ATTEMPTS and exc.retryable:
                         logger.warn(tag, f"{self._safe(str(exc))}; retrying once")
-                        # If a response was syntactically valid but did not match the schema,
-                        # request a clean corrected response rather than repeating blindly.
-                        if exc.status_code is None:
+                        if exc.status_code == 413 and exc.error_code.lower() == "rate_limit_exceeded":
+                            # A 413 TPM response includes the requested completion budget.
+                            # Halve that budget on the single retry; never retry an
+                            # authentication, input-size, or unrelated 413 response.
+                            payload["max_completion_tokens"] = max(
+                                256, int(payload["max_completion_tokens"]) // 2
+                            )
+                        if exc.status_code is None or exc.error_code.lower() == "json_validate_failed":
+                            # Ask for a fresh valid object after client- or provider-side
+                            # JSON validation errors, and reduce randomness for the retry.
+                            payload["temperature"] = min(temperature_value, 0.1)
                             correction = (
                                 "Your previous response was empty, malformed, or did not match "
                                 "the required JSON schema. Try again from scratch and return "
