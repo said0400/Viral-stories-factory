@@ -17,16 +17,16 @@ from .gemini_client import ImageGenError, ImageQuotaError
 
 API_BASE = "https://api.cloudflare.com/client/v4/accounts"
 
-MAX_REFERENCES = 3          # flux-2 klein accepts input_image_0 .. input_image_3
-REFERENCE_MAX_SIDE = 1024   # tested size; also keeps input-tile cost low
+MAX_REFERENCES = 3          # FLUX.2 supports input_image_0 .. input_image_3
+REFERENCE_MAX_SIDE = 480    # Cloudflare documents reference images below 512x512
 
 _RETRYABLE_STATUS = {408, 500, 502, 503, 504}
 _ACCOUNT_RE = re.compile(r"^[A-Za-z0-9]+$")
 _MODEL_RE = re.compile(r"^@(cf|hf)/[A-Za-z0-9._\-]+/[A-Za-z0-9._\-]+$")
 
 
-def _size_for(aspect_ratio: str) -> tuple[int, int]:
-    """Width/height (multiples of 16, long side 1024) for an 'a:b' aspect ratio."""
+def _size_for(aspect_ratio: str, long_side: int = 1536) -> tuple[int, int]:
+    """Return API-valid dimensions (multiples of 16), preserving aspect ratio."""
     try:
         a, b = str(aspect_ratio).split(":", 1)
         wr, hr = float(a), float(b)
@@ -35,12 +35,16 @@ def _size_for(aspect_ratio: str) -> tuple[int, int]:
     except ValueError:
         return 1024, 1024
 
+    long_side = max(1024, min(1920, int(long_side)))
+    long_side = int(round(long_side / 16.0)) * 16
+    long_side = max(1024, min(1920, long_side))
+
     if wr >= hr:
-        width = 1024
-        height = int(round(1024 * hr / wr / 16.0)) * 16
+        width = long_side
+        height = int(round(long_side * hr / wr / 16.0)) * 16
     else:
-        height = 1024
-        width = int(round(1024 * wr / hr / 16.0)) * 16
+        height = long_side
+        width = int(round(long_side * wr / hr / 16.0)) * 16
 
     return max(256, width), max(256, height)
 
@@ -148,7 +152,7 @@ class CloudflareClient:
 
         model = self.cfg.cloudflare_image_model
         multipart_model = "flux-2" in model.lower()
-        width, height = _size_for(aspect_ratio)
+        width, height = _size_for(aspect_ratio, self.cfg.image_long_side)
 
         refs: list[tuple[bytes, str]] = []
 
@@ -180,6 +184,8 @@ class CloudflareClient:
                         "width": (None, str(width)),
                         "height": (None, str(height)),
                     }
+                    if "flux-2-dev" in model.lower():
+                        files["steps"] = (None, str(self.cfg.cloudflare_image_steps))
                     for i, (data, mime) in enumerate(refs):
                         files[f"input_image_{i}"] = (f"reference_{i}.jpg", data, mime)
 
