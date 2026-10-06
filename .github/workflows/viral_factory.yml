@@ -76,7 +76,9 @@ jobs:
       GEMINI_IMAGE_MODEL: ${{ vars.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-lite-image' }}
 
       IMAGE_PROVIDER: ${{ vars.IMAGE_PROVIDER || 'cloudflare' }}
-      CLOUDFLARE_IMAGE_MODEL: ${{ vars.CLOUDFLARE_IMAGE_MODEL || '@cf/black-forest-labs/flux-2-klein-4b' }}
+      CLOUDFLARE_IMAGE_MODEL: ${{ vars.CLOUDFLARE_IMAGE_MODEL || '@cf/black-forest-labs/flux-2-dev' }}
+      CLOUDFLARE_IMAGE_STEPS: ${{ vars.CLOUDFLARE_IMAGE_STEPS || '25' }}
+      IMAGE_LONG_SIDE: ${{ vars.IMAGE_LONG_SIDE || '1536' }}
       CLOUDFLARE_TIMEOUT: ${{ vars.CLOUDFLARE_TIMEOUT || '300' }}
 
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
