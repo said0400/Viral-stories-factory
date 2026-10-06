@@ -241,3 +241,91 @@ def test_qwen_vision_keeps_analysis_prompt_when_merging_json_instructions(monkey
     assert "Describe the image's focal subject" in content[0]["text"]
     assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
     assert captured["reasoning_effort"] == "low"
+
+
+
+def test_groq_retries_provider_json_validation_failure(monkeypatch):
+    requests_seen = []
+
+    class BadResponse:
+        status_code = 400
+
+        @staticmethod
+        def json():
+            return {"error": {"code": "json_validate_failed", "message": "Failed to generate JSON"}}
+
+    class GoodResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": '{"value":"ok"}'}}]}
+
+    def fake_post(_url, **kwargs):
+        requests_seen.append(json.loads(json.dumps(kwargs["json"])))
+        return BadResponse() if len(requests_seen) == 1 else GoodResponse()
+
+    monkeypatch.setattr("src.groq_client.requests.post", fake_post)
+    monkeypatch.setattr("src.groq_client.time.sleep", lambda _seconds: None)
+    client = GroqClient(Settings(groq_api_key="secret"))
+
+    assert client.generate_json("return JSON", ResultSchema, tag="TRIAGE").value == "ok"
+    assert len(requests_seen) == 2
+    assert requests_seen[1]["temperature"] == 0.1
+    assert any(
+        "Try again from scratch" in message.get("content", "")
+        for message in requests_seen[1]["messages"]
+    )
+
+
+def test_groq_limits_completion_budget_and_reduces_it_after_tpm_413(monkeypatch):
+    requests_seen = []
+
+    class Response:
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+        def json(self):
+            if self.status_code == 413:
+                return {
+                    "error": {
+                        "code": "rate_limit_exceeded",
+                        "message": "Request too large on tokens per minute (TPM): Limit 8000, Requested 10621",
+                    }
+                }
+            return {"choices": [{"message": {"content": '{"value":"ok"}'}}]}
+
+    def fake_post(_url, **kwargs):
+        requests_seen.append(json.loads(json.dumps(kwargs["json"])))
+        return Response(413 if len(requests_seen) == 1 else 200)
+
+    monkeypatch.setattr("src.groq_client.requests.post", fake_post)
+    monkeypatch.setattr("src.groq_client.time.sleep", lambda _seconds: None)
+    client = GroqClient(Settings(groq_api_key="secret"))
+
+    assert client.generate_json("check claims", ResultSchema, tag="FACTCHECK").value == "ok"
+    assert len(requests_seen) == 2
+    assert requests_seen[0]["max_completion_tokens"] == 1024
+    assert requests_seen[1]["max_completion_tokens"] == 512
+
+
+def test_groq_uses_task_specific_completion_budgets(monkeypatch):
+    budgets = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": '{"value":"ok"}'}}]}
+
+    def fake_post(_url, **kwargs):
+        budgets.append((kwargs["json"]["messages"][-1]["content"], kwargs["json"]["max_completion_tokens"]))
+        return Response()
+
+    monkeypatch.setattr("src.groq_client.requests.post", fake_post)
+    client = GroqClient(Settings(groq_api_key="secret", groq_model="test-model"))
+    for tag in ("ARTICLE", "TRIAGE", "METADATA", "FACTCHECK"):
+        client.generate_json("short request", ResultSchema, tag=tag)
+
+    assert [budget for _, budget in budgets] == [4096, 4096, 2048, 1024]
