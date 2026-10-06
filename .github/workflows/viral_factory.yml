@@ -35,7 +35,7 @@ permissions:
 
 jobs:
   run:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     env:
@@ -104,14 +104,14 @@ jobs:
       WHATSAPP_CONTENT_SID: ${{ secrets.WHATSAPP_CONTENT_SID }}
 
       GEMINI_CONTENT_MODEL: ${{ vars.GEMINI_CONTENT_MODEL || 'gemini-3.8-flash' }}
-      GEMINI_CONTENT_FALLBACKS: ${{ vars.GEMINI_CONTENT_FALLBACKS || 'gemini-3.6-flash,gemini-3.5-flash,gemini-2.5-flash' }}
+      GEMINI_CONTENT_FALLBACKS: ${{ vars.GEMINI_CONTENT_FALLBACKS || 'gemini-3.6-flash,gemini-3.5-flash' }}
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -166,7 +166,7 @@ jobs:
       # Export failures must never fail the workflow.
       - name: Upload downloadable story bundles
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: story-bundles-${{ github.run_id }}
           path: |
