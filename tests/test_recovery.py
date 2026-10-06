@@ -2,11 +2,12 @@
 import dataclasses
 from datetime import datetime, timezone
 
+from src import image_generator as image_mod
 from src import main as m
 from src.config import Settings
 from src.models import BloggerResult, SourceArticle, WhatsAppResult
 from src.twilio_whatsapp import WhatsAppError
-from tests.test_pipeline_smoke import FakeGemini, FakeProvider
+from tests.test_pipeline_smoke import FakeGemini, FakeProvider, _source_photo
 
 
 class FakeBlogger:
@@ -59,6 +60,11 @@ def test_recovery_no_duplicate_blogger(tmp_path, monkeypatch):
         m,
         "GeminiClient",
         FakeGemini,
+    )
+    monkeypatch.setattr(
+        image_mod,
+        "fetch_photos",
+        lambda *args, **kwargs: [_source_photo(51), _source_photo(52)],
     )
 
     monkeypatch.setattr(
