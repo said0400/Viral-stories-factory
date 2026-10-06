@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from PIL import Image
 
 from src import content as editorial
+from src.cloudflare_client import _prepare_reference, _size_for
+from src.config import Settings
 from src.facebook import FacebookError, build_package
 from src.history import History
 from src.image_generator import REALISTIC_NEWS_STYLE, build_prompt, choose_strategy, validate_image
@@ -298,6 +300,25 @@ def test_image_validation():
     )[0]
 
     assert hamming(ah, ah) == 0
+
+
+def test_high_quality_image_dimensions_and_cloudflare_reference_limit():
+    assert _size_for("1:1", 1536) == (1536, 1536)
+    assert _size_for("16:9", 1536) == (1536, 864)
+    assert _size_for("16:9", 1537) == (1536, 864)
+
+    src = Image.new("RGB", (1200, 900), (90, 120, 150))
+    buf = io.BytesIO()
+    src.save(buf, "PNG")
+    prepared, mime = _prepare_reference(buf.getvalue(), "image/png")
+    ref = Image.open(io.BytesIO(prepared))
+    assert mime == "image/jpeg"
+    assert max(ref.size) <= 480
+
+    cfg = Settings.from_env({})
+    assert cfg.cloudflare_image_model.endswith("flux-2-dev")
+    assert cfg.image_long_side == 1536
+    assert cfg.cloudflare_image_steps == 25
 
 
 def test_whatsapp_chunking():
