@@ -217,7 +217,7 @@ def analyze(
     article: SourceArticle,
     image: tuple[bytes, str] | None,
 ) -> VisualAnalysis:
-    """Gemini vision when an image exists; text-only editorial analysis otherwise."""
+    """Groq vision first, with Gemini failover, for source-aware visual analysis."""
 
     ctx = (
         f"STORY TITLE: {article.original_title}\n"
