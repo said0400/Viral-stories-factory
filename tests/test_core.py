@@ -382,6 +382,12 @@ def test_high_quality_image_dimensions_and_cloudflare_reference_limit():
     assert cfg.cloudflare_image_model.endswith("flux-2-dev")
     assert cfg.image_long_side == 1536
     assert cfg.cloudflare_image_steps == 25
+    assert "gemini-2.5-flash" not in cfg.content_models
+    assert cfg.gemini_fallback_model == "gemini-3.5-flash"
+    overridden = Settings.from_env({
+        "GEMINI_CONTENT_FALLBACKS": "gemini-3.6-flash,gemini-2.5-flash",
+    })
+    assert overridden.content_models == ["gemini-3.8-flash", "gemini-3.6-flash"]
 
 
 def test_whatsapp_chunking():
