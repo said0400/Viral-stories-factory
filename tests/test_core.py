@@ -6,8 +6,9 @@ from PIL import Image
 from src import content as editorial
 from src.facebook import FacebookError, build_package
 from src.history import History
-from src.image_generator import build_prompt, choose_strategy, validate_image
+from src.image_generator import REALISTIC_NEWS_STYLE, build_prompt, choose_strategy, validate_image
 from src.models import GeneratedContent, SourceArticle, StoryState, VisualAnalysis
+from src.photo_composer import compose_square
 from src.twilio_whatsapp import _chunks
 from src.utils import make_story_id, normalize_url, parse_datetime, title_similarity
 from src.visual_analyzer import ahash, hamming
@@ -174,17 +175,13 @@ def test_blogger_html_has_marker_attribution_and_ai_note():
     assert "https://img/x.jpg" in html
 
 
-def test_people_never_get_realistic_face_strategy():
+def test_people_use_real_face_reference_including_minors():
     v = VisualAnalysis(
         subject_type="person",
         contains_real_people=True,
     )
 
-    assert choose_strategy(
-        v,
-        True,
-        "illustration",
-    ) == ("people_safe", "illustration")
+    assert choose_strategy(v, True, "illustration") == ("reference_identity", REALISTIC_NEWS_STYLE)
 
     kid = VisualAnalysis(
         subject_type="person",
@@ -192,11 +189,7 @@ def test_people_never_get_realistic_face_strategy():
         involves_minors=True,
     )
 
-    assert choose_strategy(
-        kid,
-        True,
-        "illustration",
-    ) == ("people_safe", "faceless")
+    assert choose_strategy(kid, True, "illustration") == ("reference_identity", REALISTIC_NEWS_STYLE)
 
     animal = VisualAnalysis(
         subject_type="animal",
@@ -224,7 +217,23 @@ def test_people_never_get_realistic_face_strategy():
         "16:9",
     )
 
-    assert "NOT resemble any real individual" in p
+    assert "Show visible faces naturally and clearly" in p
+    assert "anonymize people" in p
+
+
+def test_facebook_composition_templates_are_square_and_text_free():
+    photos = [Image.new("RGB", (800, 600), color) for color in ((180, 30, 30), (30, 180, 30), (30, 30, 180))]
+    for layout, expected_count in (
+        ("INSET_CIRCLE_RIGHT", 2),
+        ("INSET_SQUARE_LEFT", 2),
+        ("DIPTYCH_SPLIT", 2),
+        ("DIPTYCH_STACK", 2),
+        ("TRIPTYCH", 3),
+        ("TRIPTYCH_BOTTOM", 3),
+    ):
+        canvas, used = compose_square(photos[:expected_count], layout)
+        assert canvas.size == (1080, 1080)
+        assert used == expected_count
 
 
 def _img(color, noise=False):
