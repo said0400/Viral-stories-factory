@@ -1,10 +1,10 @@
 """Replaceable image layer.
 
-IMAGE_MODE=faithful (default): re-render the SOURCE photo as a cinematic version of the same scene.
-IMAGE_MODE=creative: reference-aware editorial photojournalism.
+IMAGE_MODE=faithful (default): AI-restyle the SOURCE photo for the article hero image.
+IMAGE_MODE=creative: create a reference-aware editorial article image.
 
 Facebook uses source photos as references for newly generated high-resolution panels,
-then composes a square, text-free image using a story-specific layout.
+then composes a square, text-free Facebook image using a story-specific layout.
 """
 from __future__ import annotations
 
@@ -19,7 +19,13 @@ from .cloudflare_client import CloudflareClient
 from .config import Settings
 from .gemini_client import GeminiClient, GeminiError, ImageGenError, ImageQuotaError
 from .models import ImageCheckSchema, ImageResult, SourceArticle, VisualAnalysis
-from .photo_composer import compose_square, fetch_photos, to_reference
+from .photo_composer import (
+    analyze_source_photos,
+    compose_original_square,
+    compose_square,
+    fetch_photos,
+    to_reference,
+)
 from .utils import PoliteFetcher, sha256_hex
 from .visual_analyzer import ahash, hamming
 
@@ -458,6 +464,43 @@ class ImageGenerator:
         except Exception:
             pass
 
+    def _facebook_original_composite(
+        self,
+        *,
+        article: SourceArticle,
+        composition_type: str,
+        source_ref: tuple[bytes, str] | None,
+        out_path: Path,
+    ) -> tuple[str, str, str]:
+        """Analyze, select, crop, and compose actual article photos; never call an image-generation model."""
+        photos = fetch_photos(article, self.fetcher, limit=6) if self.fetcher else []
+        if source_ref:
+            try:
+                ref_img = Image.open(io.BytesIO(source_ref[0])).convert("RGB")
+                ref_hash = ahash(ref_img)
+                if not any(hamming(ref_hash, ahash(photo)) <= 6 for photo in photos):
+                    photos.insert(0, ref_img)
+            except Exception as exc:
+                logger.warn("PHOTO", f"source reference could not be decoded ({type(exc).__name__})")
+
+        if not photos:
+            raise ImageGenError("The official article did not provide a usable original photo for Facebook")
+
+        selected = analyze_source_photos(self.gem, article, photos, limit=3)
+        if not selected:
+            raise ImageGenError("No original article photo could be selected for Facebook")
+
+        layout = str(self.cfg.facebook_layout or "auto").strip().lower()
+        if layout == "auto":
+            layout = str(composition_type or "auto").strip().lower()
+        canvas, used_count = compose_original_square(selected, layout)
+        digest, visual_hash = _save_jpeg(canvas, out_path)
+        logger.log(
+            "PHOTO",
+            f"Facebook original-photo square ready: layout={layout}, source_photos={used_count}, candidates={len(photos)}; no image generation used",
+        )
+        return digest, visual_hash, "original_photos"
+
     def _facebook_composite(
         self,
         *,
@@ -472,7 +515,7 @@ class ImageGenerator:
         known: list[tuple[str, str]],
         out_path: Path,
     ) -> tuple[str, str, str]:
-        """Create AI-restyled components from source photos, then compose a text-free square."""
+        """Legacy AI-generated Facebook path; normal production mode uses original photos instead."""
         photos = fetch_photos(article, self.fetcher, limit=3) if self.fetcher else []
 
         if source_ref:
@@ -755,24 +798,36 @@ class ImageGenerator:
 
         if self.cfg.facebook_separate_image:
             try:
-                fb_sha, fb_ah, used = self._facebook_composite(
-                    story_id=story_id,
-                    article=article,
-                    v=v,
-                    title=title,
-                    scene=facebook_scene or article_scene,
-                    detail_scene=facebook_detail_scene,
-                    composition_type=facebook_composition_type,
-                    source_ref=source_ref,
-                    known=[*known, (sha, ah)],
-                    out_path=fb_out,
-                )
+                if self.cfg.facebook_image_mode == "original":
+                    fb_sha, fb_ah, used = self._facebook_original_composite(
+                        article=article,
+                        composition_type=facebook_composition_type,
+                        source_ref=source_ref,
+                        out_path=fb_out,
+                    )
+                else:
+                    fb_sha, fb_ah, used = self._facebook_composite(
+                        story_id=story_id,
+                        article=article,
+                        v=v,
+                        title=title,
+                        scene=facebook_scene or article_scene,
+                        detail_scene=facebook_detail_scene,
+                        composition_type=facebook_composition_type,
+                        source_ref=source_ref,
+                        known=[*known, (sha, ah)],
+                        out_path=fb_out,
+                    )
                 res.facebook_path = str(fb_out)
                 res.facebook_image_hash = fb_sha
                 res.facebook_image_ahash = fb_ah
                 res.notes += f"; facebook_layout={self.cfg.facebook_layout or facebook_composition_type}; facebook_generation={used}"
 
             except (ImageQuotaError, ImageGenError) as exc:
+                if self.cfg.facebook_image_mode == "original":
+                    # Do not substitute an AI-generated article image into a Facebook asset
+                    # when the user explicitly requested original article photos only.
+                    raise ImageGenError(f"Original-photo Facebook composition failed: {exc}") from exc
                 logger.warn("IMAGE", f"Facebook composite failed; creating a square fallback from the article image ({exc})")
                 try:
                     article_img = Image.open(res.path).convert("RGB")
