@@ -1,6 +1,6 @@
 """Facebook photo layouts built only from original images found in the source article.
 
-Gemini ranks the images and marks focal regions; PIL only crops, enlarges, and arranges
+Groq (with Gemini failover) ranks the images and marks focal regions; PIL only crops, enlarges, and arranges
 the original pixels. It does not synthesize, repaint, anonymize, or erase image content.
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ BACKGROUND = (12, 14, 18)
 RING = (255, 196, 0)             # yellow ring of the circular inset
 MAX_DOWNLOAD_BYTES = 12 * 1024 * 1024
 MIN_SIDE = 400
-MAX_CANDIDATES = 6
+MAX_CANDIDATES = 8
 NATURAL_MAX_SIDE = 1200
 RATIO_MIN = 0.8                  # 4:5
 RATIO_MAX = 1.91                 # 1.91:1
@@ -144,13 +144,13 @@ def analyze_source_photos(
     article: SourceArticle,
     photos: list[Image.Image],
     *,
-    limit: int = 3,
+    limit: int = 4,
 ) -> list[SelectedPhoto]:
     """Rank source photos in vision-sized batches and find story-specific focal boxes."""
     if not photos:
         return []
 
-    limit = max(1, min(int(limit), 3))
+    limit = max(1, min(int(limit), 4))
     excerpt = (article.article_text or article.description or "")[:1800]
     verdicts: dict[int, PhotoAssessmentSchema] = {}
     for start in range(0, len(photos), 3):
@@ -162,8 +162,9 @@ def analyze_source_photos(
             f"You receive {len(batch)} ORIGINAL article images in order for global indices {global_indices}.\n"
             "Return each image's global index, relevance_score (0-100), visual_impact_score (0-100), "
             "focus_center_x, focus_center_y, focus_width, focus_height (normalized 0-1000), and focal_description.\n"
-            "Rank highest the genuine source photos that best show the verified event or an important detail. "
-            "The focal rectangle should include the important person/object/evidence and enough context.\n"
+            "Rank highest the genuine, distinct source photos that best show the verified event or a different important detail; avoid near-duplicate angles when better distinct photos exist. "
+            "Give relevance below 45 to unrelated, stock, or decorative images; only clearly story-related photos should score 45 or higher. "
+            "Place the focal rectangle tightly around the exact important person/object/evidence, but retain enough surroundings to explain the scene; coordinates are normalized to 0-1000 of the original pixels.\n"
             "Source-native captions, signs, interface elements, arrows, logos, watermarks, and collage panels "
             "are part of the original; do not erase or reject them. Analyze visible content only. "
             "Do not identify people, infer unsupported facts, or request image generation/editing."
@@ -196,7 +197,7 @@ def analyze_source_photos(
     for i, photo in enumerate(photos):
         v = verdicts.get(i)
         if v is None:
-            selected = SelectedPhoto(photo, (250, 180, 750, 820), max(0, 65 - i * 3), 55, "center-crop fallback")
+            selected = SelectedPhoto(photo, (250, 180, 750, 820), 20, 20, "AI analysis unavailable; center-crop fallback")
         else:
             cx = max(0, min(1000, int(v.focus_center_x)))
             cy = max(0, min(1000, int(v.focus_center_y)))
@@ -215,7 +216,7 @@ def analyze_source_photos(
         ranked.append((combined, i, selected))
 
     ranked.sort(key=lambda row: (row[0], -row[1]), reverse=True)
-    relevant = [row for row in ranked if row[2].relevance_score >= 35]
+    relevant = [row for row in ranked if row[2].relevance_score >= 45]
     if not relevant and ranked:
         relevant = ranked[:1]
     chosen = [item for _, _, item in relevant[:limit]]
@@ -343,6 +344,7 @@ SQUARE_LAYOUTS = {
     "diptych_stack",
     "triptych",
     "triptych_bottom",
+    "quad_grid",
 }
 
 
@@ -498,6 +500,8 @@ def _layout_name(value: str) -> str:
         "diptych": "diptych_split",
         "split": "diptych_split",
         "stack": "diptych_stack",
+        "quad": "quad_grid",
+        "grid_2x2": "quad_grid",
     }
     name = aliases.get(name, name)
     return name if name in SQUARE_LAYOUTS else "auto"
@@ -521,12 +525,14 @@ def compose_original_square(
     if not photos:
         raise ValueError("no original photos to compose")
 
-    photos = photos[:3]
+    photos = photos[:4]
     normalized = _layout_name(layout)
     count = len(photos)
 
     if normalized == "auto":
-        if count >= 3:
+        if count >= 4:
+            normalized = "quad_grid"
+        elif count >= 3:
             normalized = "triptych"
         elif count == 2 and abs(photos[0].relevance_score - photos[1].relevance_score) <= 15:
             normalized = "diptych_split"
@@ -537,6 +543,9 @@ def compose_original_square(
         # Prefer the user's two-photo minimum when the source offers a second relevant image.
         # With only one source image, the inset becomes a magnified crop of that same photo.
         normalized = "inset_circle_right"
+
+    if normalized == "quad_grid" and count < 4:
+        normalized = "triptych" if count >= 3 else "diptych_split" if count >= 2 else "inset_circle_right"
 
     if normalized.startswith("inset_"):
         main = _focus_crop(photos[0], (SQUARE_SIDE, SQUARE_SIDE), context=3.0)
@@ -579,6 +588,15 @@ def compose_original_square(
         canvas.paste(_focus_crop(photos[0], (SQUARE_SIDE, top_h), context=2.7), (0, 0))
         canvas.paste(_focus_crop(photos[1], (SQUARE_SIDE, bottom_h), context=2.7), (0, top_h + gap))
         return canvas, 2
+
+    if normalized == "quad_grid":
+        gap = 8
+        cell = (SQUARE_SIDE - gap) // 2
+        canvas = Image.new("RGB", (SQUARE_SIDE, SQUARE_SIDE), BACKGROUND)
+        positions = [(0, 0), (cell + gap, 0), (0, cell + gap), (cell + gap, cell + gap)]
+        for photo, (x, y) in zip(photos[:4], positions):
+            canvas.paste(_focus_crop(photo, (cell, cell), context=2.2), (x, y))
+        return canvas, 4
 
     if count < 3:
         return compose_original_square(photos, "inset_circle_right")
