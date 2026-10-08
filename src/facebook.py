@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 from .models import FacebookPackage, GeneratedContent
 
-CTA_LINE = "التفاصيل الكاملة وما حدث بعد ذلك تجدها في المقال 👇"
+CTA_LINE = "رابط المقال والتفاصيل الكاملة في أول تعليق 👇"
 
 MAX_FACEBOOK_POST_LENGTH = 63206
 MAX_FACEBOOK_TITLE_LENGTH = 255
@@ -15,6 +15,23 @@ MAX_FACEBOOK_COMMENT_LENGTH = 10000
 
 class FacebookError(Exception):
     pass
+
+
+def _caption(content: GeneratedContent) -> str:
+    """Produce one copy-ready caption: headline, body, and relevant hashtags."""
+    title = (content.facebook_title or "").strip()
+    body = (content.facebook_post or "").strip()
+    if title and body.startswith(title):
+        body = body[len(title):].lstrip(" \n:—-")
+    tags: list[str] = []
+    for raw in getattr(content, "facebook_hashtags", []) or []:
+        token = re.sub(r"[^\w]", "", str(raw or "").strip().lstrip("#"), flags=re.UNICODE)
+        if len(token) >= 2:
+            hashtag = "#" + token
+            if hashtag not in tags:
+                tags.append(hashtag)
+    parts = [part for part in (title, body, " ".join(tags[:5])) if part]
+    return "\n\n".join(parts)
 
 
 def _contains_url(text: str) -> bool:
@@ -111,7 +128,7 @@ def _validate_source_url(source_url: str) -> None:
 
 def _validate_lengths(content: GeneratedContent) -> None:
     """Protect against unexpectedly large generated Facebook fields."""
-    facebook_post = (content.facebook_post or "").strip()
+    facebook_post = _caption(content)
     facebook_title = (content.facebook_title or "").strip()
     first_comment_hook = (content.first_comment_hook or "").strip()
 
@@ -176,7 +193,7 @@ def build_content_package(
 
     return FacebookPackage(
         title=content.facebook_title.strip(),
-        post=content.facebook_post.strip(),
+        post=_caption(content),
         first_comment=content.first_comment_hook.strip(),
         image_path=(image_path or "").strip(),
     )
@@ -212,7 +229,7 @@ def build_package(
     # ------------------------------------------------------------------
     validate_facebook_content(content)
 
-    facebook_post = content.facebook_post.strip()
+    facebook_post = _caption(content)
     first_comment_hook = content.first_comment_hook.strip()
 
     if blogger_url in facebook_post:
@@ -228,16 +245,9 @@ def build_package(
     # ------------------------------------------------------------------
     # Final promotion package with standard CTA
     # ------------------------------------------------------------------
-    post = (
-        f"{facebook_post}\n\n"
-        f"{CTA_LINE}\n"
-        f"{blogger_url}"
-    )
+    post = f"{facebook_post}\n\n{CTA_LINE}"
 
-    comment = (
-        f"{first_comment_hook} 👇\n"
-        f"{blogger_url}"
-    )
+    comment = f"{first_comment_hook.rstrip(' 👇')}\n{blogger_url}"
 
     return FacebookPackage(
         title=content.facebook_title.strip(),
