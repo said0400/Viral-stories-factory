@@ -361,6 +361,19 @@ class GeminiClient:
                         )
                         continue
                     raise
+                except Exception as exc:
+                    # SDK/runtime failures must not block the configured fallback
+                    # model; log only the exception type, not potentially sensitive text.
+                    last = GeminiError(
+                        f"Unexpected {type(exc).__name__} while calling Gemini model {name}"
+                    )
+                    logger.warn(
+                        tag,
+                        f"Unexpected {type(exc).__name__} from model '{name}'; trying the next configured model",
+                    )
+                    if index + 1 < len(models):
+                        continue
+                    raise last from exc
 
             if key_limited:
                 continue
