@@ -23,7 +23,6 @@ from .photo_composer import (
     SelectedPhoto,
     analyze_source_photos,
     compose_original_square,
-    compose_square,
     fetch_photos,
     plan_layout,
     refine_focus_boxes,
@@ -33,7 +32,6 @@ from .utils import PoliteFetcher, sha256_hex
 from .visual_analyzer import ahash, hamming
 
 ARTICLE_ASPECT = "16:9"
-FACEBOOK_ASPECT = "1:1"    # all Facebook panels and final composites are square
 MAX_THUMBNAIL_BRIEF_CHARS = 1200
 
 FAITHFUL = "faithful_restyle"
@@ -161,7 +159,7 @@ def _faithful_prompt(
     thumbnail_brief: str = "",
 ) -> str:
     parts = [
-        f"Create a premium, high-resolution square 1:1 editorial photograph." if aspect == "1:1" else f"Create a premium, high-resolution {aspect} editorial hero photograph.",
+        "Create a premium, high-resolution square 1:1 editorial photograph." if aspect == "1:1" else f"Create a premium, high-resolution {aspect} editorial hero photograph.",
         "The attached images are reference photographs from the SAME official article; use them as factual visual references for the same verified story.",
         "Create one coherent, polished editorial photojournalism thumbnail, not a collage and not a literal low-quality copy of any reference.",
         "Preserve each real person's recognizable identity, apparent age, face, expression, pose, hair, clothing, and all story-critical objects and setting.",
@@ -398,11 +396,11 @@ def vlm_check(gem: GeminiClient, jpeg: bytes, title: str, summary: str) -> tuple
 
         return ok, r.reason
 
-    except GeminiError:
-        return True, "check unavailable (skipped)"
+    except GeminiError as exc:
+        return False, f"check unavailable: {type(exc).__name__}"
     except Exception as exc:
-        logger.warn("IMGCHECK", f"VLM check error ({type(exc).__name__}); skipping")
-        return True, "check unavailable (skipped)"
+        logger.warn("IMGCHECK", f"VLM check error ({type(exc).__name__}); rejecting image")
+        return False, f"check unavailable: {type(exc).__name__}"
 
 
 def fidelity_check(
@@ -441,11 +439,11 @@ def fidelity_check(
 
         return ok, r.reason
 
-    except GeminiError:
-        return True, "check unavailable (skipped)"
+    except GeminiError as exc:
+        return False, f"check unavailable: {type(exc).__name__}"
     except Exception as exc:
-        logger.warn("IMGCHECK", f"fidelity check error ({type(exc).__name__}); skipping")
-        return True, "check unavailable (skipped)"
+        logger.warn("IMGCHECK", f"fidelity check error ({type(exc).__name__}); rejecting image")
+        return False, f"check unavailable: {type(exc).__name__}"
 
 
 # ------------------------------------------------------------------ main entry
@@ -509,102 +507,6 @@ class ImageGenerator:
             f"Facebook original-photo square ready: layout={layout}, source_photos={used_count}, candidates={candidate_count}; no image generation used",
         )
         return digest, visual_hash, "original_photos"
-
-    def _facebook_composite(
-        self,
-        *,
-        story_id: str,
-        article: SourceArticle,
-        v: VisualAnalysis,
-        title: str,
-        scene: str,
-        detail_scene: str,
-        composition_type: str,
-        source_ref: tuple[bytes, str] | None,
-        known: list[tuple[str, str]],
-        out_path: Path,
-    ) -> tuple[str, str, str]:
-        """Legacy AI-generated Facebook path; normal production mode uses original photos instead."""
-        photos = fetch_photos(article, self.fetcher, limit=3) if self.fetcher else []
-
-        if source_ref:
-            try:
-                ref_img = Image.open(io.BytesIO(source_ref[0])).convert("RGB")
-                ref_hash = ahash(ref_img)
-                if not any(hamming(ref_hash, ahash(p)) <= 6 for p in photos):
-                    photos.insert(0, ref_img)
-            except Exception:
-                logger.warn("IMAGE", "Facebook source reference could not be decoded; continuing with discovered images")
-
-        refs = [to_reference(p) for p in photos[:3]]
-        layout = str(self.cfg.facebook_layout or "auto").strip().lower()
-        if layout == "auto":
-            layout = str(composition_type or "inset_circle_right").strip().lower()
-        layout = layout.replace("-", "_")
-        number_needed = 3 if layout in {"triptych", "triptych_bottom"} else 2
-        if not refs:
-            logger.warn("IMAGE", "No source photo was usable; Facebook components will be generated from verified story context")
-
-        component_images: list[Image.Image] = []
-        component_hashes = list(known)
-        component_paths: list[Path] = []
-        generated_strategies: list[str] = []
-
-        try:
-            for index in range(number_needed):
-                if index < len(refs):
-                    ref = refs[index]
-                    strategy = FAITHFUL
-                    prompt_scene = scene if index == 0 else detail_scene or scene
-                elif refs:
-                    # If the publisher only supplies one image, create a second
-                    # related framing from that reference rather than publishing it raw.
-                    ref = refs[0]
-                    strategy = "reference_identity"
-                    prompt_scene = detail_scene or "A distinct, closer editorial view of the same story subject and setting."
-                else:
-                    ref = None
-                    strategy = "editorial"
-                    prompt_scene = scene if index == 0 else detail_scene or scene
-
-                temp_path = self.cfg.images_dir / f"{story_id}_fb_component_{index}.jpg"
-                component_paths.append(temp_path)
-                source_hash = ahash(Image.open(io.BytesIO(ref[0])).convert("RGB")) if ref else ""
-                sha, image_hash, used = self._one(
-                    kind=f"facebook component {index + 1}",
-                    strategy=strategy,
-                    style=self.cfg.cinematic_style if strategy == FAITHFUL else REALISTIC_NEWS_STYLE,
-                    v=v,
-                    scene_idea=prompt_scene,
-                    title=title,
-                    aspect=FACEBOOK_ASPECT,
-                    ref=ref,
-                    known=component_hashes,
-                    source_ahash="" if strategy == FAITHFUL else source_hash,
-                    out_path=temp_path,
-                    summary=v.summary or article.description,
-                    composition_type="SINGLE_HERO",
-                    # Compare generated text against reference text: preserve genuine
-                    # scene signage, but reject added captions/watermarks.
-                    forbid_text=strategy == FAITHFUL,
-                )
-                component_hashes.append((sha, image_hash))
-                generated_strategies.append(used)
-                component_images.append(Image.open(temp_path).convert("RGB"))
-
-            canvas, used_count = compose_square(component_images, layout)
-            digest, visual_hash = _save_jpeg(canvas, out_path)
-            logger.log(
-                "IMAGE",
-                f"Facebook square ready: layout={layout}, generated_panels={used_count}, source_refs={len(refs)}",
-            )
-            return digest, visual_hash, "+".join(generated_strategies)
-        finally:
-            for path in component_paths:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
 
     def _one_raw(
         self,
@@ -709,8 +611,8 @@ class ImageGenerator:
                         good, reason = vlm_check(self.gem, payload, title, summary)
 
                 except Exception as exc:
-                    logger.warn("IMAGE", f"{kind}: quality check failed ({type(exc).__name__}); continuing")
-                    good, reason = True, "check unavailable (skipped)"
+                    logger.warn("IMAGE", f"{kind}: quality check failed ({type(exc).__name__}); rejecting image")
+                    good, reason = False, f"check unavailable: {type(exc).__name__}"
 
                 if not good:
                     logger.warn("IMAGE", f"{kind}: quality check failed ({reason})")
@@ -773,6 +675,20 @@ class ImageGenerator:
             # Feedback loop: the AI checks its own crop boxes and corrects them before use.
             selected_source_photos = refine_focus_boxes(self.gem, article, selected_source_photos)
 
+        # Build Facebook first, exclusively from article pixels. This path does
+        # not call ImageProvider, Cloudflare, or an image-generation model.
+        fb_out = self.cfg.images_dir / f"{story_id}_facebook.jpg"
+        try:
+            fb_sha, fb_ah, fb_used = self._facebook_original_composite(
+                article=article,
+                composition_type=facebook_composition_type,
+                selected_photos=selected_source_photos,
+                candidate_count=len(source_photos),
+                out_path=fb_out,
+            )
+        except ImageGenError as exc:
+            raise ImageGenError(f"Facebook source-photo composition failed (no AI fallback): {exc}") from exc
+
         article_refs = [to_reference(photo.image) for photo in selected_source_photos[:3]]
         if not article_refs and source_ref:
             article_refs = [source_ref]
@@ -813,23 +729,39 @@ class ImageGenerator:
         summary = story_context[:1500] or v.summary or article.description
         out = self.cfg.images_dir / f"{story_id}_generated.jpg"
 
-        sha, ah, used = self._one(
-            kind="article",
-            strategy=strategy,
-            style=style,
-            v=v,
-            scene_idea=article_visual_brief,
-            title=title,
-            aspect=ARTICLE_ASPECT,
-            ref=article_ref,
-            known=known,
-            source_ahash=check_ahash,
-            out_path=out,
-            summary=summary,
-            composition_type="SINGLE_HERO",
-            extra_refs=article_extra_refs,
-            thumbnail_brief=thumbnail_prompt,
-        )
+        try:
+            sha, ah, article_used = self._one(
+                kind="article",
+                strategy=strategy,
+                style=style,
+                v=v,
+                scene_idea=article_visual_brief,
+                title=title,
+                aspect=ARTICLE_ASPECT,
+                ref=article_ref,
+                known=known,
+                source_ahash=check_ahash,
+                out_path=out,
+                summary=summary,
+                composition_type="SINGLE_HERO",
+                extra_refs=article_extra_refs,
+                thumbnail_brief=thumbnail_prompt,
+            )
+        except (ImageGenError, GeminiError) as exc:
+            logger.warn("IMAGE", f"article image failed after Facebook source composite was saved ({type(exc).__name__})")
+            return ImageResult(
+                path="",
+                facebook_path=str(fb_out),
+                strategy=strategy,
+                style=style,
+                identity_confidence=confidence,
+                facebook_image_hash=fb_sha,
+                facebook_image_ahash=fb_ah,
+                source_image_url=source_url,
+                source_image_hash=source_sha,
+                source_image_ahash=source_ahash,
+                notes=f"article_image_error={type(exc).__name__}; facebook_generation={fb_used}; facebook_mode=source_pixels_only",
+            )
 
         res = ImageResult(
             path=str(out),
@@ -843,66 +775,16 @@ class ImageGenerator:
             source_image_ahash=source_ahash,
             notes=(
                 "Output fidelity depends on provider/model capabilities; "
-                f"mode={self.cfg.image_mode}; provider={self.cfg.image_provider}; used={used}; "
+                f"mode={self.cfg.image_mode}; provider={self.cfg.image_provider}; used={article_used}; "
                 f"reference_used={'yes' if reference_used else 'no'}; "
                 f"thumbnail_brief={'yes' if thumbnail_prompt.strip() else 'no'}; "
-                f"facebook_mode={self.cfg.facebook_image_mode}"
+                "facebook_mode=source_pixels_only"
             ),
         )
 
-        # ---------------------------------------------------------------- Facebook image
-        fb_out = self.cfg.images_dir / f"{story_id}_facebook.jpg"
-
-        if self.cfg.facebook_separate_image:
-            try:
-                if self.cfg.facebook_image_mode == "original":
-                    fb_sha, fb_ah, used = self._facebook_original_composite(
-                        article=article,
-                        composition_type=facebook_composition_type,
-                        selected_photos=selected_source_photos,
-                        candidate_count=len(source_photos),
-                        out_path=fb_out,
-                    )
-                else:
-                    fb_sha, fb_ah, used = self._facebook_composite(
-                        story_id=story_id,
-                        article=article,
-                        v=v,
-                        title=title,
-                        scene=facebook_scene or article_scene,
-                        detail_scene=facebook_detail_scene,
-                        composition_type=facebook_composition_type,
-                        source_ref=source_ref,
-                        known=[*known, (sha, ah)],
-                        out_path=fb_out,
-                    )
-                res.facebook_path = str(fb_out)
-                res.facebook_image_hash = fb_sha
-                res.facebook_image_ahash = fb_ah
-                res.notes += f"; facebook_layout={self.cfg.facebook_layout or facebook_composition_type}; facebook_generation={used}"
-
-            except (ImageQuotaError, ImageGenError) as exc:
-                if self.cfg.facebook_image_mode == "original":
-                    # Do not substitute an AI-generated article image into a Facebook asset
-                    # when the user explicitly requested original article photos only.
-                    raise ImageGenError(f"Original-photo Facebook composition failed: {exc}") from exc
-                logger.warn("IMAGE", f"Facebook composite failed; creating a square fallback from the article image ({exc})")
-                try:
-                    article_img = Image.open(res.path).convert("RGB")
-                    fallback, _ = compose_square([article_img, article_img], "inset_circle_right")
-                    fb_sha, fb_ah = _save_jpeg(fallback, fb_out)
-                    res.facebook_path = str(fb_out)
-                    res.facebook_image_hash = fb_sha
-                    res.facebook_image_ahash = fb_ah
-                except Exception as fallback_exc:
-                    logger.warn("IMAGE", f"Square fallback failed ({type(fallback_exc).__name__}); reusing article image")
-                    res.facebook_path = res.path
-                    res.facebook_image_hash = sha
-                    res.facebook_image_ahash = ah
-
-        else:
-            res.facebook_path = res.path
-            res.facebook_image_hash = sha
-            res.facebook_image_ahash = ah
+        res.facebook_path = str(fb_out)
+        res.facebook_image_hash = fb_sha
+        res.facebook_image_ahash = fb_ah
+        res.notes += f"; facebook_layout={self.cfg.facebook_layout or facebook_composition_type}; facebook_generation={fb_used}"
 
         return res
