@@ -1,10 +1,9 @@
 """Replaceable image layer.
 
-IMAGE_MODE=faithful (default): AI-restyle the SOURCE photo for the article hero image.
-IMAGE_MODE=creative: create a reference-aware editorial article image.
+IMAGE_MODE=faithful (default): create a reference-aware article thumbnail from the best source photos.
+IMAGE_MODE=creative: create an editorial article thumbnail, still guided by available references.
 
-Facebook uses source photos as references for newly generated high-resolution panels,
-then composes a square, text-free Facebook image using a story-specific layout.
+Facebook uses only original article pixels, selecting and cropping them with Groq analysis.
 """
 from __future__ import annotations
 
@@ -20,6 +19,7 @@ from .config import Settings
 from .gemini_client import GeminiClient, GeminiError, ImageGenError, ImageQuotaError
 from .models import ImageCheckSchema, ImageResult, SourceArticle, VisualAnalysis
 from .photo_composer import (
+    SelectedPhoto,
     analyze_source_photos,
     compose_original_square,
     compose_square,
@@ -157,8 +157,8 @@ def _faithful_prompt(
 ) -> str:
     parts = [
         f"Create a premium, high-resolution square 1:1 editorial photograph." if aspect == "1:1" else f"Create a premium, high-resolution {aspect} editorial hero photograph.",
-        "The attached image is the SOURCE PHOTOGRAPH and the only authority for the real people and factual scene.",
-        "Create a polished, believable editorial photojournalism image of the SAME verified moment, not a literal low-quality copy.",
+        "The attached images are reference photographs from the SAME official article; use them as factual visual references for the same verified story.",
+        "Create one coherent, polished editorial photojournalism thumbnail, not a collage and not a literal low-quality copy of any reference.",
         "Preserve each real person's recognizable identity, apparent age, face, expression, pose, hair, clothing, and all story-critical objects and setting.",
         "You MAY improve camera framing, crop, perspective, exposure, lighting, focus, and tonal balance to make the image more compelling and legible.",
         "Make the main person or subject large and immediately recognizable; keep eyes, faces, and story-critical details tack sharp.",
@@ -168,6 +168,7 @@ def _faithful_prompt(
         "Preserve legible, story-relevant physical signs already present in the source if possible; never invent or rewrite lettering.",
         f"Visual treatment: {style_text}.",
         "No text overlays, headlines, captions, watermarks, logos, arrows, decorative borders, collages, or graphic frames.",
+        "Thumbnail art direction: premium YouTube-style editorial thumbnail, instantly understandable at small size, one dominant subject, expressive but factual moment, strong focal separation, crisp details, clean composition, controlled contrast, and a visually compelling horizontal 16:9 frame.",
     ]
 
     if title:
@@ -178,7 +179,7 @@ def _faithful_prompt(
     if aspect == "1:1":
         parts.append("Use a bold mobile-first crop with one obvious focal subject; keep the subject clear even at small feed size.")
     else:
-        parts.append("Use a strong horizontal hero composition with enough scene context, while keeping the main subject prominent and readable.")
+        parts.append("Use a strong horizontal 16:9 thumbnail composition with enough verified scene context, while keeping the main subject prominent and readable. Render absolutely no written characters or text.")
 
     if not simple:
         parts.append("Avoid: " + NEGATIVE_FAITHFUL + ", tiny distant subjects, excessive shallow-focus blur, fog, heavy grain, muddy shadows, blown highlights, flat frontal lighting, plastic skin, awkward crop, busy background, unbalanced composition.")
@@ -469,35 +470,22 @@ class ImageGenerator:
         *,
         article: SourceArticle,
         composition_type: str,
-        source_ref: tuple[bytes, str] | None,
+        selected_photos: list[SelectedPhoto],
+        candidate_count: int,
         out_path: Path,
     ) -> tuple[str, str, str]:
         """Analyze, select, crop, and compose actual article photos; never call an image-generation model."""
-        photos = fetch_photos(article, self.fetcher, limit=6) if self.fetcher else []
-        if source_ref:
-            try:
-                ref_img = Image.open(io.BytesIO(source_ref[0])).convert("RGB")
-                ref_hash = ahash(ref_img)
-                if not any(hamming(ref_hash, ahash(photo)) <= 6 for photo in photos):
-                    photos.insert(0, ref_img)
-            except Exception as exc:
-                logger.warn("PHOTO", f"source reference could not be decoded ({type(exc).__name__})")
-
-        if not photos:
+        if not selected_photos:
             raise ImageGenError("The official article did not provide a usable original photo for Facebook")
-
-        selected = analyze_source_photos(self.gem, article, photos, limit=3)
-        if not selected:
-            raise ImageGenError("No original article photo could be selected for Facebook")
 
         layout = str(self.cfg.facebook_layout or "auto").strip().lower()
         if layout == "auto":
             layout = str(composition_type or "auto").strip().lower()
-        canvas, used_count = compose_original_square(selected, layout)
+        canvas, used_count = compose_original_square(selected_photos[:4], layout)
         digest, visual_hash = _save_jpeg(canvas, out_path)
         logger.log(
             "PHOTO",
-            f"Facebook original-photo square ready: layout={layout}, source_photos={used_count}, candidates={len(photos)}; no image generation used",
+            f"Facebook original-photo square ready: layout={layout}, source_photos={used_count}, candidates={candidate_count}; no image generation used",
         )
         return digest, visual_hash, "original_photos"
 
@@ -634,6 +622,7 @@ class ImageGenerator:
         detail_scene_idea: str = "",
         composition_type: str = "SINGLE_HERO",
         forbid_text: bool = False,
+        extra_refs: list[tuple[bytes, str]] | None = None,
     ) -> tuple[str, str, str]:
         if strategy == FAITHFUL:
             plans: list[tuple[bool, tuple[bytes, str] | None]] = [(False, ref), (True, ref)]
@@ -659,7 +648,8 @@ class ImageGenerator:
                     "IMAGE",
                     f"{kind}: generating ({strat}, layout={composition_type}, attempt {i}/{max_attempts}, ref={'yes' if r else 'no'})",
                 )
-                data, _mime = self.provider.generate(prompt, [r] if r else None, aspect)
+                refs = ([r] if r else []) + (list(extra_refs or []) if r else [])
+                data, _mime = self.provider.generate(prompt, refs or None, aspect)
 
             except ImageQuotaError:
                 raise
@@ -733,30 +723,62 @@ class ImageGenerator:
         source_ahash: str,
         known: list[tuple[str, str]],
     ) -> ImageResult:
-        faithful = self.cfg.image_mode == "faithful" and source_ref is not None
+        # Fetch the article's editorial images once. Groq ranks each candidate and
+        # marks a source-pixel crop; the same vetted set feeds the article thumbnail
+        # references and the non-generative Facebook composite.
+        source_photos = fetch_photos(article, self.fetcher, limit=8) if self.fetcher else []
+        if source_ref:
+            try:
+                ref_img = Image.open(io.BytesIO(source_ref[0])).convert("RGB")
+                ref_hash = ahash(ref_img)
+                if not any(hamming(ref_hash, ahash(photo)) <= 6 for photo in source_photos):
+                    source_photos.insert(0, ref_img)
+            except Exception as exc:
+                logger.warn("PHOTO", f"source reference could not be decoded ({type(exc).__name__})")
+
+        selected_source_photos = (
+            analyze_source_photos(self.gem, article, source_photos, limit=4)
+            if source_photos
+            else []
+        )
+        article_refs = [to_reference(photo.image) for photo in selected_source_photos[:3]]
+        if not article_refs and source_ref:
+            article_refs = [source_ref]
+        primary_ref = article_refs[0] if article_refs else source_ref
+        article_extra_refs = article_refs[1:]
+
+        faithful = self.cfg.image_mode == "faithful" and primary_ref is not None
 
         if faithful:
             strategy, style = FAITHFUL, self.cfg.cinematic_style
-            article_ref = crop_to_aspect(source_ref, ARTICLE_ASPECT)
-            facebook_ref = crop_to_aspect(source_ref, FACEBOOK_ASPECT)
+            article_ref = primary_ref
             check_ahash = ""
             confidence = v.identity_confidence
             reference_used = True
         else:
             if self.cfg.image_mode == "faithful":
-                logger.warn("IMAGE", "faithful mode not possible (no usable source image); using creative path")
+                logger.warn("IMAGE", "faithful mode not possible (no usable source photos); using creative path")
 
-            strategy, style = choose_strategy(v, bool(source_ref), self.cfg.people_image_style)
-            article_ref = facebook_ref = source_ref if strategy == "reference_identity" else None
+            strategy, style = choose_strategy(v, bool(primary_ref), self.cfg.people_image_style)
+            article_ref = primary_ref
             check_ahash = source_ahash
             confidence = (
                 v.identity_confidence
-                if (strategy == "reference_identity" and source_ref is not None and v.reference_required)
+                if (strategy == "reference_identity" and primary_ref is not None and v.reference_required)
                 else "low"
             )
             reference_used = article_ref is not None
 
-        summary = v.summary or article.description
+        story_context = " ".join(
+            part for part in (article.original_title, article.description, article.article_text[:900]) if part
+        )
+        article_visual_brief = "\n".join(
+            part for part in (
+                article_scene.strip(),
+                f"Verified article context (visual guidance only; do not render words): {story_context[:1500]}",
+            ) if part
+        )
+        summary = story_context[:1500] or v.summary or article.description
         out = self.cfg.images_dir / f"{story_id}_generated.jpg"
 
         sha, ah, used = self._one(
@@ -764,7 +786,7 @@ class ImageGenerator:
             strategy=strategy,
             style=style,
             v=v,
-            scene_idea=article_scene,
+            scene_idea=article_visual_brief,
             title=title,
             aspect=ARTICLE_ASPECT,
             ref=article_ref,
@@ -773,6 +795,7 @@ class ImageGenerator:
             out_path=out,
             summary=summary,
             composition_type="SINGLE_HERO",
+            extra_refs=article_extra_refs,
         )
 
         res = ImageResult(
@@ -802,7 +825,8 @@ class ImageGenerator:
                     fb_sha, fb_ah, used = self._facebook_original_composite(
                         article=article,
                         composition_type=facebook_composition_type,
-                        source_ref=source_ref,
+                        selected_photos=selected_source_photos,
+                        candidate_count=len(source_photos),
                         out_path=fb_out,
                     )
                 else:
