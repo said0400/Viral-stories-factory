@@ -146,9 +146,8 @@ NEVER pad the article to reach a word count.
 - does not invent facts
 - does not use false clickbait
 
-8. facebook_post (caption, always separate from the image):
-Structure:
-HOOK -> INTEREST -> PARTIAL CONTEXT -> CURIOSITY. Make it read like a vivid description of the actual visual, with a natural open loop and a clear reason to read the article.
+8. facebook_post (caption body, always separate from the image):
+Structure: HOOK -> INTEREST -> PARTIAL CONTEXT -> CURIOSITY. Make it read like a vivid description of the actual story, with a natural open loop and a clear reason to read the article. The publishing system will place facebook_title above this body and append facebook_hashtags so they appear as ONE complete Facebook post.
 
 Do NOT include any URL or website placeholder.
 Do NOT reveal the entire story or main twist.
@@ -157,11 +156,14 @@ Do NOT claim that something happened unless the source confirms it.
 Vary openings and avoid stock phrases.
 
 9. first_comment_hook:
-One short, natural sentence inviting readers to read the full details.
+One short, natural sentence inviting readers to learn the complete story and what happened next. The system places the real Blogger article URL directly below this sentence.
 No URL.
 No fabricated claim.
 
-10. labels:
+10. facebook_hashtags:
+Return 3-5 concise, relevant hashtags (each as one token beginning with #). Use Arabic where natural, and English only for a genuinely useful topic tag. No generic viral/reach claims, unrelated tags, spaces, or URLs.
+
+11. labels:
 Return 2-5 Arabic labels genuinely related to the story.
 Examples:
 قصص غريبة
@@ -172,17 +174,18 @@ Examples:
 
 Do not add unrelated SEO labels.
 
-11. facebook_composition_type MUST be strictly one of these square layouts made only from original source photos:
+12. facebook_composition_type MUST be strictly one of these square layouts made only from original source photos:
 - "INSET_CIRCLE_RIGHT" / "INSET_CIRCLE_LEFT": one large main photo with a small round secondary photo in the chosen upper corner.
 - "INSET_SQUARE_RIGHT" / "INSET_SQUARE_LEFT": same composition with a square inset.
 - "DIPTYCH_SPLIT": two distinct photos side by side; best for two people, perspectives, or moments.
 - "DIPTYCH_STACK": two photos stacked; best for a clear before/after or sequence.
 - "TRIPTYCH": one large vertical panel beside two smaller stacked panels (three images).
 - "TRIPTYCH_BOTTOM": two small square panels above one wide lower panel (three images).
+- "QUAD_GRID": four story-relevant photos in a balanced 2×2 grid.
 - "SINGLE_HERO": only when the story genuinely has one compelling visual; otherwise prefer at least two photos.
 Choose the layout that best communicates the verified story at a glance. The Facebook image is assembled from original article images only; do not request newly generated or AI-restyled pictures. The hook and headline belong in facebook_title/facebook_post, outside the image.
 
-12. facebook_scene_idea & facebook_detail_scene_idea:
+13. facebook_scene_idea & facebook_detail_scene_idea:
 - Give concise descriptions of the two most visually important, source-supported details that would help select original article photos.
 - These descriptions are analysis hints only. Never invent a new scene or use them to request an AI-generated/repainted image.
 - If the official article has only one usable photo, the image pipeline may show a magnified crop of that same original photo as a secondary detail.
@@ -193,36 +196,37 @@ STRICT VISUAL RULES:
 - Never remove or rewrite source-native signs, captions, arrows, logos, watermarks, or other marks: they are part of the original photograph. The visual analyzer chooses relevant material; it does not edit pixels.
 - Use ONLY factual elements supported by the source text or visible in the original article photos.
 
-13. REAL PEOPLE:
+14. REAL PEOPLE:
 For the AI-generated article hero only, when a source photo is supplied, keep the depicted person's recognizable face, apparent age, clothing, and key identity cues consistent with that photo. Facebook photos are original source pixels and are not generated. Describe only factual/contextual information supported by the source; do not invent identity, biography, motives, or sensitive attributes.
 
-14. PEOPLE OF ANY AGE:
+15. PEOPLE OF ANY AGE:
 Do not blur, mask, anonymize, or intentionally hide a person's face when it is visible in a reference for the AI-generated article image. The image model may still vary facial details; never claim a perfect identity match.
 
-15. SOURCE IMAGE:
+16. SOURCE IMAGE:
 The Facebook visual is assembled from the actual photos found in the official article. Prefer the most story-relevant distinct photos and identify a focal crop for enlargement, while keeping useful surrounding context. Do not synthesize missing image content.
 
-16. NON-HUMAN SUBJECTS:
+17. NON-HUMAN SUBJECTS:
 For animals, vehicles, buildings, places, objects, preserve important identifying characteristics supported by the source or reference image.
 
-17. UNCERTAINTY:
+18. UNCERTAINTY:
 If the source does not establish a detail, omit it or clearly mark it as uncertain.
 
-18. FACTUAL PRIORITY:
+19. FACTUAL PRIORITY:
 Accuracy is more important than drama.
 
-19. SEO:
-seo_description must be <= 155 characters in Arabic.
+20. SEO:
+Derive a primary search phrase from SOURCE TEXT. Use it naturally in blogger_title, the opening or a relevant heading, and seo_description without keyword stuffing. Use clear descriptive H2/H3 headings, useful context, and a natural Arabic meta description of <=155 characters. Never invent search volume, rankings, or facts.
 
-20. FINAL CONSISTENCY:
+21. FINAL CONSISTENCY:
 All fields must remain consistent with the same source facts."""
 
 ARTICLE_STYLE_PROMPT = """اكتب بالعربية البسيطة المفهومة لمعظم القراء العرب، بصوت تحريري طبيعي ودافئ.
 نوّع أطوال الجمل والإيقاع، واختر مفردات دقيقة وغير مكررة من دون تعقيد مصطنع أو حشو.
 تجنب العبارات المستهلكة مثل: «في الآونة الأخيرة»، «علاوة على ذلك»، «في الختام»، «تجدر الإشارة»، «من الجدير بالذكر»، «يمثل»، و«يعتبر».
 اختر نبرة مناسبة للموضوع تلقائيًا: ودية أو تعليمية أو حماسية، من دون افتعال.
+اجعل العربية الفصحى المبسطة هي الأساس، مع لمسات خليجية سعودية وقطرية مألوفة وخفيفة جدًا عند ملاءمتها طبيعيًا (مثل: وش، شنو، وايد، مرة)؛ لا تكدّس اللهجات ولا تجعل النص محليًا بحيث يصعب على بقية العرب فهمه.
 لا تدّعِ أنك إنسان أو أنك جرّبت شيئًا، ولا تختلق تجربة شخصية بصيغة المتكلم؛ استخدم المتكلم فقط إذا كانت تجربة الكاتب مثبتة في المصدر.
-ابدأ بهوك صادق وجذاب من دون اختلاق تشويق، ثم نظّم المقال بعناوين <h2> و<h3> عند الحاجة وفقرات قصيرة واضحة.
+ابدأ بهوك صادق وجذاب من دون اختلاق تشويق، ثم نظّم المقال بعناوين <h2> و<h3> عند الحاجة وفقرات قصيرة واضحة. استخرج عبارة البحث الأهم من المصدر، وأدرجها بسلاسة في العنوان/المقدمة وعنوان فرعي مناسب ووصف SEO، مع مرادفات طبيعية ومن دون تكرار آلي.
 قدّم للقارئ قيمة وسياقًا أو خلاصة عملية مما يثبته المصدر، ولا تملأ المقال بمعلومات خارج النص المصدر.
 اكتب مقالًا كاملًا ومترابطًا، لكن لا تحشُ الكلام للوصول إلى طول محدد إذا كان المصدر قصيرًا."""
 
@@ -239,16 +243,17 @@ EDITORIAL_METADATA_SYSTEM = """أنت محرر عربي ومدقق للمعلو�
 لا تضف واقعة أو رقمًا أو اسمًا غير موجود في المصدر، ولا تجعل الفضول تضليلًا أو clickbait كاذبًا.
 لا تخترع أرقام المشاهدات أو المتابعين أو الشعبية أو جودة الصور أو دوافع الأشخاص والحيوانات. إذا لم يثبت المصدر التفصيل، احذفه بدل تخمينه.
 blogger_title واضح وجذاب ولا يتجاوز 90 حرفًا. seo_description لا يتجاوز 155 حرفًا.
-facebook_title قصير وقوي ومناسب للهاتف. facebook_post يبني هوك ثم اهتمامًا وسياقًا جزئيًا وفضولًا صادقًا، ولا يكشف كل القصة ولا يحتوي رابطًا.
-first_comment_hook جملة قصيرة تدعو إلى قراءة التفاصيل من دون رابط أو ادعاء غير مسند.
+facebook_title قصير وقوي ومناسب للهاتف؛ سيظهر مرة واحدة في بداية النص المنشور. facebook_post هو المتن فقط: هوك ثم اهتمام وسياق جزئي وفضول صادق، ولا يكشف كل القصة ولا يحتوي رابطًا. أعد facebook_hashtags من 3 إلى 5 وسوم دقيقة، ليضمها النظام إلى المنشور نفسه بعد العنوان والمتن.
+اكتب العنوان والمتن بعبارة عربية بسيطة مفهومة لمعظم العرب، مع لمسة خليجية طبيعية وخفيفة فقط حين تلائم القصة. اجعل الهوك مؤثرًا ومثيرًا للفضول لكن صادقًا وغير مبالغ فيه.
+first_comment_hook جملة قصيرة تدعو بوضوح إلى معرفة تفاصيل القصة كاملة وما حدث بعدها؛ سيضيف النظام رابط المقال الحقيقي مباشرة بعدها. لا تضع رابطًا أو ادعاء غير مسند.
 labels من 2 إلى 5 تصنيفات عربية ذات صلة.
-اختر facebook_composition_type من: INSET_CIRCLE_RIGHT, INSET_CIRCLE_LEFT, INSET_SQUARE_RIGHT, INSET_SQUARE_LEFT, DIPTYCH_SPLIT, DIPTYCH_STACK, TRIPTYCH, TRIPTYCH_BOTTOM, SINGLE_HERO.
+اختر facebook_composition_type من: INSET_CIRCLE_RIGHT, INSET_CIRCLE_LEFT, INSET_SQUARE_RIGHT, INSET_SQUARE_LEFT, DIPTYCH_SPLIT, DIPTYCH_STACK, TRIPTYCH, TRIPTYCH_BOTTOM, QUAD_GRID, SINGLE_HERO.
 اكتب article_scene_idea وfacebook_scene_idea وfacebook_detail_scene_idea كإشارات تحليلية موجزة مدعومة بالمصدر فقط؛ لا تطلب توليد صورة Facebook.
 لا تعِد كتابة blogger_html؛ أعد حقول البيانات التحريرية فقط وفق المخطط."""
 
 FACT_SYSTEM = """You are a strict fact checker.
 
-Compare the article headline/body/headings, SEO description, Facebook title/post/first comment, and all scene ideas against the verifiable facts in the SOURCE TEXT.
+Compare the article headline/body/headings, SEO description, Facebook title/post/hashtags/first comment, and all scene ideas against the verifiable facts in the SOURCE TEXT.
 
 Flag every checkable factual assertion that is not supported, especially numbers, popularity/reach claims, causal claims, motives, identity, and claims about an account or image.
 Do not flag an unmistakable figure of speech or clearly subjective impression as a factual claim unless it also asserts a concrete event or detail. Do not excuse unsupported numbers or factual-sounding claims as “style”.
@@ -314,6 +319,19 @@ def _strip_urls(text: str) -> str:
     value = _URL_RE.sub("", value)
     value = re.sub(r"[ \t]{2,}", " ", value)
     return value.strip()
+
+
+def _normalize_hashtags(values: list[str] | None) -> list[str]:
+    """Keep short, single-token hashtags and normalize their leading #."""
+    out: list[str] = []
+    for raw in values or []:
+        token = re.sub(r"[^\w]", "", str(raw or "").strip().lstrip("#"), flags=re.UNICODE)
+        if len(token) < 2:
+            continue
+        hashtag = "#" + token
+        if hashtag not in out:
+            out.append(hashtag)
+    return out[:5]
 
 
 def _safe_story_id(story_id: str) -> str:
@@ -528,6 +546,8 @@ def _quality_issues(article: SourceArticle, content: GeneratedContent) -> list[s
         issues.append("Keep the main article headline concise (90 characters or fewer).")
     if not content.facebook_title.strip() or len(content.facebook_title.strip()) > 100:
         issues.append("Write a short, compelling Facebook caption headline (100 characters or fewer).")
+    if not 3 <= len(content.facebook_hashtags) <= 5:
+        issues.append("Provide three to five relevant, concise Facebook hashtags.")
 
     source_words = len(re.findall(r"\S+", article.article_text or article.description or ""))
     body = BeautifulSoup(content.blogger_html or "", "lxml")
@@ -604,6 +624,7 @@ def generate_content(
     data["blogger_title"] = _strip_urls(data["blogger_title"])
     data["facebook_title"] = _strip_urls(data["facebook_title"])
     data["facebook_post"] = _strip_urls(data["facebook_post"])
+    data["facebook_hashtags"] = _normalize_hashtags(data.get("facebook_hashtags"))
     data["first_comment_hook"] = _strip_urls(data["first_comment_hook"])
     data["seo_description"] = str(data["seo_description"] or "").strip()[:155].rstrip()
 
@@ -616,7 +637,7 @@ def generate_content(
     }.get(comp_type, comp_type)
     if comp_type not in {
         "DIPTYCH_SPLIT", "DIPTYCH_STACK", "INSET_CIRCLE_RIGHT", "INSET_CIRCLE_LEFT",
-        "INSET_SQUARE_RIGHT", "INSET_SQUARE_LEFT", "TRIPTYCH", "TRIPTYCH_BOTTOM", "SINGLE_HERO",
+        "INSET_SQUARE_RIGHT", "INSET_SQUARE_LEFT", "TRIPTYCH", "TRIPTYCH_BOTTOM", "QUAD_GRID", "SINGLE_HERO",
     }:
         comp_type = "INSET_CIRCLE_RIGHT"
     data["facebook_composition_type"] = comp_type
@@ -650,6 +671,7 @@ def fact_check(
         f"ARTICLE BODY:\n{plain[:12000]}\n\n"
         f"FACEBOOK TITLE:\n{content.facebook_title}\n\n"
         f"FACEBOOK POST:\n{content.facebook_post}\n\n"
+        f"FACEBOOK HASHTAGS:\n{' '.join(content.facebook_hashtags)}\n\n"
         f"FIRST COMMENT:\n{content.first_comment_hook}\n\n"
         f"ARTICLE SCENE IDEA:\n{content.article_scene_idea}\n\n"
         f"FACEBOOK SCENE IDEA:\n{content.facebook_scene_idea}\n\n"
