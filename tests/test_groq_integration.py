@@ -35,15 +35,16 @@ class StubProvider:
         return schema(value=self.value)
 
 
-def test_router_assigns_article_to_gemini_and_other_text_to_groq():
+def test_router_assigns_writing_to_gemini_and_analysis_to_groq():
     gemini = StubProvider("gemini")
     groq = StubProvider("groq")
     router = LLMRouter(gemini, groq)
 
     assert router.generate_json("p", ResultSchema, tag="ARTICLE").value == "gemini"
-    assert router.generate_json("p", ResultSchema, tag="METADATA").value == "groq"
-    assert gemini.calls == ["ARTICLE"]
-    assert groq.calls == ["METADATA"]
+    assert router.generate_json("p", ResultSchema, tag="METADATA").value == "gemini"
+    assert router.generate_json("p", ResultSchema, tag="FACTCHECK").value == "groq"
+    assert gemini.calls == ["ARTICLE", "METADATA"]
+    assert groq.calls == ["FACTCHECK"]
 
 
 def test_router_falls_back_in_both_directions():
@@ -144,10 +145,10 @@ def test_photo_analysis_splits_six_candidates_into_vision_batches():
         photos.append(Image.new("RGB", (400, 400), (i * 30, 40, 80)))
 
     analyzer = BatchAnalyzer()
-    selected = analyze_source_photos(analyzer, article, photos, limit=3)
+    selected = analyze_source_photos(analyzer, article, photos, limit=4)
     assert analyzer.batch_sizes == [3, 3]
     assert analyzer.indices == [[0, 1, 2], [3, 4, 5]]
-    assert [photo.reason for photo in selected] == ["subject 0", "subject 1", "subject 2"]
+    assert [photo.reason for photo in selected] == ["subject 0", "subject 1", "subject 2", "subject 3"]
 
 
 def test_gpt_oss_uses_low_hidden_reasoning_for_json(monkeypatch):
