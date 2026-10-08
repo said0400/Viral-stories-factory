@@ -101,50 +101,61 @@ class Factory:
     def run(self) -> int:
         log("RUN", f"mode={'DRY RUN' if self.dry else 'LIVE'} | target/day={self.cfg.target_daily_stories}")
 
-        published = self.hist.published_today()
+        if not self.dry:
+            migrated = self.hist.sanitize_cached_sources()
+            if migrated:
+                log("HISTORY", f"redacted source text from {migrated} legacy cache file(s)")
+
         base = self.cfg.number_of_stories if self.cfg.number_of_stories > 0 else self.cfg.max_stories_per_run
-
-        if self.cfg.manual_override or self.dry:
-            quota = base
-        else:
-            quota = min(base, max(0, self.cfg.target_daily_stories - published))
-
-        log("RUN", f"published today={published}; quota for this run={quota}")
-
-        if quota <= 0:
-            log("RUN", "daily target reached; nothing to do")
-            return 0
-
-        done = 0
+        recovery_attempts = 0
 
         # ---------------------------------------------------------- recovery
         if not self.dry:
             for st in self.hist.resumable(self.cfg.max_story_attempts):
-                if done >= quota:
+                if recovery_attempts >= base:
                     break
 
                 log("RECOVERY", f"resuming {st.story_id} from status={st.status}")
-                done += self._guarded(st, article=None)
+                recovery_attempts += 1
+                self._guarded(st, article=None)
+
+        # Recovery is not blocked by today's publication target. Recalculate
+        # after recovery because a previously unpublished story may now publish.
+        published = self.hist.published_today()
+        daily_quota = base if self.cfg.manual_override or self.dry else min(
+            base, max(0, self.cfg.target_daily_stories - published)
+        )
+        remaining_run_slots = max(0, base - recovery_attempts)
+        quota = min(daily_quota, remaining_run_slots)
+
+        log(
+            "RUN",
+            f"published today={published}; recovered attempts={recovery_attempts}; "
+            f"quota for new stories={quota}",
+        )
+
+        if quota <= 0:
+            log("RUN", "no new-story quota remains; recovery pass is complete")
+            return 0
 
         # ---------------------------------------------------------- discovery
-        if done < quota:
-            for art in self._discover_and_select(quota - done):
-                st = StoryState(
-                    story_id=make_story_id(art.source_name, art.normalized_url),
-                    source=art.source_name,
-                    original_url=art.original_url,
-                    normalized_url=art.normalized_url,
-                    original_title=art.original_title,
-                    discovered_at=iso(art.discovered_at),
-                    selected_at=iso(),
-                    status=H.SELECTED,
-                )
+        for art in self._discover_and_select(quota):
+            st = StoryState(
+                story_id=make_story_id(art.source_name, art.normalized_url),
+                source=art.source_name,
+                original_url=art.original_url,
+                normalized_url=art.normalized_url,
+                original_title=art.original_title,
+                discovered_at=iso(art.discovered_at),
+                selected_at=iso(),
+                status=H.SELECTED,
+            )
 
-                if not self.dry:
-                    self.hist.upsert(st)
-                    self.hist.save_cache(st.story_id, StoryCache(article=art))
+            if not self.dry:
+                self.hist.upsert(st)
+                self.hist.save_cache(st.story_id, StoryCache(article=art))
 
-                done += self._guarded(st, article=art)
+            self._guarded(st, article=art)
 
         log(
             "SUMMARY",
@@ -335,6 +346,13 @@ class Factory:
 
         article = article or cache.article
 
+        if article and not article.article_text and not cache.content:
+            refreshed = extractor.extract_article(article, self.fetcher)
+            if not refreshed:
+                raise StoryFailed("recovery", "cached source text is missing and re-extraction failed")
+            article = refreshed
+            cache.article = refreshed
+
         if not article:
             raise StoryFailed("recovery", "no cached article to resume from")
 
@@ -376,7 +394,11 @@ class Factory:
         content = cache.content
 
         # ---- 2. Article hero image (AI) + original-photo Facebook composite
-        image_exists = bool(cache.image and _is_file(cache.image.path))
+        image_exists = bool(
+            cache.image
+            and _is_file(cache.image.path)
+            and _is_file(cache.image.facebook_path)
+        )
 
         if image_exists:
             st.image_status = "generated"
@@ -384,7 +406,6 @@ class Factory:
         need_image = (
             (not self.dry or self.cfg.dry_run_generate_images)
             and not image_exists
-            and not st.blogger_url  # never regenerate for an already published story
         )
 
         if need_image:
@@ -432,6 +453,13 @@ class Factory:
                     known=self.hist.image_hashes(),
                 )
 
+                if self.cfg.image_required and not (
+                    cache.image and _is_file(cache.image.path)
+                ):
+                    raise ImageGenError(
+                        "article image provider failed; the Facebook source-photo image was preserved"
+                    )
+
             except (ImageGenError, GeminiError) as exc:
                 st.image_status = "failed"
 
@@ -445,20 +473,30 @@ class Factory:
                 warn(tag, "image failed; continuing without image (IMAGE_REQUIRED=false)")
 
             else:
-                st.image_status = "generated"
-                st.image_generated_at = iso()
-                st.subject_type = cache.visual.subject_type
-                st.identity_confidence = cache.image.identity_confidence
-                st.source_image_url = cache.image.source_image_url
-                st.source_image_hash = cache.image.source_image_hash
-                st.source_image_ahash = cache.image.source_image_ahash
-                st.generated_image_path = cache.image.path
-                st.generated_image_hash = cache.image.generated_hash
-                st.generated_image_ahash = cache.image.generated_ahash
+                article_image_ok = bool(cache.image and _is_file(cache.image.path))
+                st.image_status = "generated" if article_image_ok else "failed"
+                if article_image_ok:
+                    st.image_generated_at = iso()
+                    st.subject_type = cache.visual.subject_type
+                    st.identity_confidence = cache.image.identity_confidence
+                    st.source_image_url = cache.image.source_image_url
+                    st.source_image_hash = cache.image.source_image_hash
+                    st.source_image_ahash = cache.image.source_image_ahash
+                    st.generated_image_path = cache.image.path
+                    st.generated_image_hash = cache.image.generated_hash
+                    st.generated_image_ahash = cache.image.generated_ahash
+                else:
+                    warn(tag, "article image unavailable; source-photo Facebook image remains available")
 
                 if not self.dry:
-                    if st.status in (H.SELECTED, H.GENERATED, H.IMAGE_FAILED):
+                    if article_image_ok and st.status in (H.SELECTED, H.GENERATED, H.IMAGE_FAILED):
                         self.hist.set_status(st, H.IMAGE_GENERATED)
+                    elif not article_image_ok:
+                        self.hist.set_status(
+                            st,
+                            H.IMAGE_FAILED,
+                            error=cache.image.notes if cache.image else "article image unavailable",
+                        )
                     else:
                         self.hist.upsert(st)
 
@@ -577,7 +615,11 @@ class Factory:
 
     def _facebook(self, st: StoryState, cache: StoryCache, art: SourceArticle) -> None:
         try:
-            img_path = (cache.image.facebook_path or cache.image.path) if cache.image else ""
+            # Facebook assets must be source-photo composites; never substitute
+            # the AI-generated Blogger hero image.
+            img_path = cache.image.facebook_path if cache.image else ""
+            if not img_path or not _is_file(img_path):
+                raise FacebookError("a source-photo Facebook image is required; no AI fallback is allowed")
 
             cache.facebook = build_package(cache.content, st.blogger_url, art.original_url, img_path)
 
@@ -613,7 +655,7 @@ class Factory:
             url = ""
 
             if img:
-                path = img.facebook_path or img.path
+                path = img.facebook_path
 
                 if _is_file(path):
                     urls = publish_images(self.cfg, [path], st.story_id, wait_seconds=60)
@@ -684,6 +726,9 @@ class Factory:
         if self.cfg.image_required and st.image_status != "generated":
             problems.append("image_invalid")
 
+        if not cache.image or not _is_file(cache.image.facebook_path):
+            problems.append("facebook_source_image_invalid")
+
         if (
             st.facebook_status != "ready"
             or not cache.facebook
@@ -699,8 +744,15 @@ class Factory:
 
     def _write_dry(self, st: StoryState, cache: StoryCache) -> None:
         out = Path(self.cfg.dry_run_dir) / f"{st.story_id}.json"
-
-        atomic_write_json(out, cache.model_dump(mode="json"))
+        preview = cache.model_copy(deep=True)
+        if preview.article:
+            preview.article = preview.article.model_copy(
+                update={
+                    "article_text": "",
+                    "description": preview.article.description[:500],
+                }
+            )
+        atomic_write_json(out, preview.model_dump(mode="json"))
 
         log("DRY-RUN", f"saved preview to {out}")
 
