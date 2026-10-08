@@ -14,13 +14,13 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class LLMRouter:
-    """Gemini writes article bodies; Groq leads other text/analysis tasks.
+    """Gemini writes articles and social copy; Groq leads analysis tasks.
 
     Each task falls back to the other provider when its preferred provider is
-    missing or fails. Image generation remains delegated to Gemini.
+    missing or fails. Image generation remains delegated to the configured image provider.
     """
 
-    _GEMINI_PRIMARY_TAGS = {"ARTICLE"}
+    _GEMINI_PRIMARY_TAGS = {"ARTICLE", "METADATA"}
 
     def __init__(self, gemini: GeminiClient, groq: GroqClient) -> None:
         self.gemini = gemini
