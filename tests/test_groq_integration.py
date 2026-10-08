@@ -198,7 +198,6 @@ def test_groq_retries_once_after_schema_validation_error(monkeypatch):
 
 
 def test_groq_http_error_includes_safe_status_and_provider_reason():
-    import pytest
     from src.groq_client import GroqError
 
     class Response:
