@@ -90,7 +90,7 @@ class Settings:
     image_mode: str = "faithful"            # faithful | creative  (article image)
     cinematic_style: str = DEFAULT_CINEMATIC_STYLE
     facebook_image_mode: str = "original"  # original article photos only; no AI image generation
-    facebook_layout: str = "auto"           # auto | insets | diptychs | triptychs
+    facebook_layout: str = "auto"           # auto | insets | diptychs | triptychs | quad_grid
     facebook_separate_image: bool = True    # keep a dedicated original-photo Facebook composite
     image_vlm_check: bool = True
     image_required: bool = True
@@ -99,9 +99,9 @@ class Settings:
     day_timezone: str = "Africa/Casablanca"
 
     # --- gemini
-    gemini_model: str = "gemini-3.5-flash-lite"              # triage / visual analysis / image check
+    gemini_model: str = "gemini-3.5-flash-lite"              # fallback for Groq-led triage / visual analysis / image checks
     gemini_fallback_model: str = "gemini-3.5-flash"
-    gemini_content_model: str = DEFAULT_CONTENT_MODEL         # article / posts / titles / fact check
+    gemini_content_model: str = DEFAULT_CONTENT_MODEL         # article, titles, SEO, and social copy
     gemini_content_fallbacks: str = DEFAULT_CONTENT_FALLBACKS  # comma separated
     gemini_image_model: str = "gemini-3.1-flash-lite-image"
     gemini_api_key: str = ""
@@ -193,7 +193,7 @@ class Settings:
         allowed_layouts = {
             "auto", "single_hero", "inset_circle_right", "inset_circle_left",
             "inset_square_right", "inset_square_left", "diptych_split", "diptych_stack",
-            "triptych", "triptych_bottom",
+            "triptych", "triptych_bottom", "quad_grid",
         }
         layout = layout.replace("-", "_").replace(" ", "_")
         layout = {
