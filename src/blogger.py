@@ -289,7 +289,7 @@ class BloggerClient:
 
         raise BloggerError(
             "post not live / valid HTTPS URL missing after "
-            f"publish verification retries"
+            "publish verification retries"
             + (f" ({last_error})" if last_error else "")
         )
 
