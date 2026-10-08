@@ -89,9 +89,7 @@ class Settings:
     people_image_style: str = "reference"   # real source faces are retained where a reference exists
     image_mode: str = "faithful"            # faithful | creative  (article image)
     cinematic_style: str = DEFAULT_CINEMATIC_STYLE
-    facebook_image_mode: str = "original"  # original article photos only; no AI image generation
     facebook_layout: str = "auto"           # auto | insets | diptychs | triptychs | quad_grid
-    facebook_separate_image: bool = True    # keep a dedicated original-photo Facebook composite
     image_vlm_check: bool = True
     image_required: bool = True
 
@@ -185,10 +183,6 @@ class Settings:
         mode = str(self.image_mode or "").strip().lower()
         put("image_mode", mode if mode in {"faithful", "creative"} else "faithful")
 
-        # Facebook is intentionally composed from original article pixels only.
-        put("facebook_image_mode", "original")
-        put("facebook_separate_image", True)
-
         layout = str(self.facebook_layout or "").strip().lower()
         allowed_layouts = {
             "auto", "single_hero", "inset_circle_right", "inset_circle_left",
@@ -245,9 +239,7 @@ class Settings:
             people_image_style=_str("PEOPLE_IMAGE_STYLE", "reference", env),
             image_mode=_str("IMAGE_MODE", "faithful", env),
             cinematic_style=_str("CINEMATIC_STYLE", DEFAULT_CINEMATIC_STYLE, env),
-            facebook_image_mode=_str("FACEBOOK_IMAGE_MODE", "original", env),
             facebook_layout=_str("FACEBOOK_LAYOUT", "auto", env),
-            facebook_separate_image=_bool("FACEBOOK_SEPARATE_IMAGE", True, env),
             image_vlm_check=_bool("IMAGE_VLM_CHECK", True, env),
             image_required=_bool("IMAGE_REQUIRED", True, env),
             day_timezone=_str("DAY_TIMEZONE", "Africa/Casablanca", env),
