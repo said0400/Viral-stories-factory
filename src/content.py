@@ -544,9 +544,10 @@ def rank_score(item: TriageItem) -> float:
 
 MAX_FIX_ROUNDS = 3
 
-# Keep the FACTCHECK request small enough for Groq's tokens-per-minute limit (Arabic is token-heavy).
-FACT_SOURCE_CHARS = 5500
-FACT_ARTICLE_CHARS = 6500
+# Reserve room for Arabic tokenization, system instructions, JSON schema, and
+# completion tokens under Groq's TPM cap.
+FACT_SOURCE_CHARS = 2500
+FACT_ARTICLE_CHARS = 3000
 
 
 def _clip(text: str, limit: int = 220) -> str:
