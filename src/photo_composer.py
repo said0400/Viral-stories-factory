@@ -1,14 +1,18 @@
 """Facebook photo layouts built only from original images found in the source article.
 
-Groq (with Gemini failover) ranks the images and marks focal regions; PIL only crops, enlarges, and arranges
+Groq (with Gemini failover) ranks the images, marks focal regions, VERIFIES each crop in a feedback
+loop and plans the layout after seeing the real crops. PIL only crops, enlarges, and arranges
 the original pixels. It does not synthesize, repaint, anonymize, or erase image content.
 """
 from __future__ import annotations
 
 import io
+import re
 from dataclasses import dataclass
+from urllib.parse import urljoin, urlparse
 
-from PIL import Image, ImageDraw, ImageOps
+from bs4 import BeautifulSoup
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 from pydantic import BaseModel, Field
 
 from . import logger
@@ -25,10 +29,104 @@ RING = (255, 196, 0)             # yellow ring of the circular inset
 MAX_DOWNLOAD_BYTES = 12 * 1024 * 1024
 MIN_SIDE = 400
 MAX_CANDIDATES = 8
+MAX_PAGE_URLS = 14
 NATURAL_MAX_SIDE = 1200
 RATIO_MIN = 0.8                  # 4:5
 RATIO_MAX = 1.91                 # 1.91:1
 LAYOUTS = {"auto", "single", "split", "inset"}
+
+
+# ------------------------------------------------------------------ discovery of ALL article photos
+_BAD_URL = re.compile(
+    r"(logo|icon|sprite|avatar|favicon|advert|/ads?/|pixel|tracking|placeholder|blank|spinner|"
+    r"emoji|badge|gravatar|1x1|\.svg|\.gif)",
+    re.IGNORECASE,
+)
+
+
+def _best_from_srcset(value: str) -> str:
+    best, best_w = "", -1
+    for part in str(value or "").split(","):
+        bits = part.strip().split()
+        if not bits:
+            continue
+        width = 0
+        if len(bits) > 1:
+            m = re.match(r"(\d+)", bits[1])
+            if m:
+                width = int(m.group(1))
+        if width >= best_w:
+            best, best_w = bits[0], width
+    return best
+
+
+def collect_page_image_urls(
+    article: SourceArticle,
+    fetcher: PoliteFetcher,
+    limit: int = MAX_PAGE_URLS,
+) -> list[str]:
+    """Scrape every story-related image URL from the article page (og:image + body images)."""
+    page = str(article.original_url or "").strip()
+    if not page or fetcher is None:
+        return []
+
+    try:
+        r = fetcher.get(page)
+    except FetchError:
+        return []
+
+    try:
+        html = r.text
+    except Exception:
+        html = ""
+    finally:
+        try:
+            r.close()
+        except Exception:
+            pass
+
+    if not html:
+        return []
+
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        return []
+
+    out: list[str] = []
+
+    def add(raw: str) -> None:
+        raw = str(raw or "").strip()
+        if not raw or raw.startswith("data:"):
+            return
+        url = urljoin(page, raw)
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return
+        if _BAD_URL.search(url):
+            return
+        if url not in out:
+            out.append(url)
+
+    for attrs in ({"property": "og:image"}, {"name": "twitter:image"}):
+        for meta in soup.find_all("meta", attrs=attrs):
+            add(meta.get("content", ""))
+
+    root = soup.find("article") or soup.find("main") or soup.body or soup
+    for img in root.find_all("img"):
+        if img.find_parent(["header", "footer", "nav", "aside"]):
+            continue
+        candidate = (
+            _best_from_srcset(img.get("data-srcset") or img.get("srcset") or "")
+            or img.get("data-src")
+            or img.get("data-lazy-src")
+            or img.get("data-original")
+            or img.get("src")
+            or ""
+        )
+        add(candidate)
+
+    return out[:limit]
 
 
 # ------------------------------------------------------------------ download
@@ -69,10 +167,18 @@ def fetch_photos(
         if u and u not in urls:
             urls.append(u)
 
+    # Also scrape the article page itself so we get ALL related images, not only what the extractor kept.
+    try:
+        for u in collect_page_image_urls(article, fetcher):
+            if u not in urls:
+                urls.append(u)
+    except Exception as exc:
+        logger.warn("PHOTO", f"page image discovery failed ({type(exc).__name__})")
+
     photos: list[Image.Image] = []
     hashes: list[str] = []
 
-    for url in urls[:10]:
+    for url in urls[:MAX_PAGE_URLS]:
         if len(photos) >= limit:
             break
 
@@ -103,6 +209,7 @@ def fetch_photos(
         hashes.append(h)
         photos.append(img)
 
+    logger.log("PHOTO", f"collected {len(photos)} distinct candidate photos from {len(urls)} discovered URLs")
     return photos
 
 
@@ -122,6 +229,21 @@ class PhotoAssessmentBatch(BaseModel):
     items: list[PhotoAssessmentSchema]
 
 
+class FocusRefineSchema(BaseModel):
+    crop_ok: bool
+    focus_center_x: int = Field(ge=0, le=1000)
+    focus_center_y: int = Field(ge=0, le=1000)
+    focus_width: int = Field(ge=80, le=1000)
+    focus_height: int = Field(ge=80, le=1000)
+    reason: str
+
+
+class LayoutPlanSchema(BaseModel):
+    layout: str
+    order: list[int]
+    reason: str
+
+
 @dataclass(frozen=True)
 class SelectedPhoto:
     image: Image.Image
@@ -137,6 +259,16 @@ def _jpeg(img: Image.Image, max_side: int = 1024) -> bytes:
     buf = io.BytesIO()
     copy.save(buf, "JPEG", quality=85)
     return buf.getvalue()
+
+
+def _box_from_center(cx: int, cy: int, fw: int, fh: int) -> tuple[int, int, int, int]:
+    cx = max(0, min(1000, int(cx)))
+    cy = max(0, min(1000, int(cy)))
+    fw = max(80, min(1000, int(fw)))
+    fh = max(80, min(1000, int(fh)))
+    x0, x1 = max(0, cx - fw // 2), min(1000, cx + fw // 2)
+    y0, y1 = max(0, cy - fh // 2), min(1000, cy + fh // 2)
+    return x0, y0, x1, y1
 
 
 def analyze_source_photos(
@@ -222,6 +354,151 @@ def analyze_source_photos(
     chosen = [item for _, _, item in relevant[:limit]]
     logger.log("PHOTO", f"selected {len(chosen)} of {len(photos)} original article photos using visual relevance and focal detail")
     return chosen
+
+
+# ------------------------------------------------------------------ crop verification loop
+def _annotated(img: Image.Image, box: tuple[int, int, int, int], max_side: int = 1024) -> bytes:
+    copy = img.copy().convert("RGB")
+    copy.thumbnail((max_side, max_side))
+    w, h = copy.size
+    x0, y0, x1, y1 = box
+    ImageDraw.Draw(copy).rectangle(
+        (x0 * w / 1000.0, y0 * h / 1000.0, x1 * w / 1000.0, y1 * h / 1000.0),
+        outline=(255, 0, 0),
+        width=max(3, w // 200),
+    )
+    buf = io.BytesIO()
+    copy.save(buf, "JPEG", quality=85)
+    return buf.getvalue()
+
+
+def refine_focus_boxes(
+    gem: GeminiClient,
+    article: SourceArticle,
+    photos: list[SelectedPhoto],
+    rounds: int = 2,
+) -> list[SelectedPhoto]:
+    """Show the AI its own crop (red box + enlarged result) and let it correct the box until it approves."""
+    excerpt = (article.article_text or article.description or "")[:1200]
+    refined: list[SelectedPhoto] = []
+
+    for number, selected in enumerate(photos, 1):
+        current = selected
+
+        for round_no in range(max(1, rounds)):
+            try:
+                preview = _focus_crop(current, (640, 640), context=1.3)
+                prompt = (
+                    f"ARTICLE TITLE: {article.original_title}\nARTICLE CONTEXT: {excerpt}\n\n"
+                    "Image 1 is an ORIGINAL article photo with a RED rectangle marking the proposed focal region. "
+                    "Image 2 is the enlarged crop around that region.\n"
+                    "The focal region must tightly contain the single most important person/animal/object/evidence for this story, "
+                    "fully inside the box (no cut-off heads, hands, faces or objects) and with no wasted empty area.\n"
+                    "Set crop_ok=true only if the box is already precise. Otherwise set crop_ok=false and return a corrected box "
+                    "(focus_center_x, focus_center_y, focus_width, focus_height) normalized 0-1000 relative to the ORIGINAL Image 1.\n"
+                    "Do not identify people or infer facts. Keep reason to one short sentence."
+                )
+                res = gem.generate_json(
+                    prompt,
+                    FocusRefineSchema,
+                    images=[
+                        (_annotated(current.image, current.focus_box), "image/jpeg"),
+                        (_jpeg(preview, 640), "image/jpeg"),
+                    ],
+                    temperature=0.0,
+                    tag="PHOTO_REFINE",
+                )
+            except Exception as exc:
+                logger.warn("PHOTO", f"crop verification unavailable for photo {number} ({type(exc).__name__})")
+                break
+
+            if res.crop_ok:
+                break
+
+            new_box = _box_from_center(res.focus_center_x, res.focus_center_y, res.focus_width, res.focus_height)
+            if new_box == current.focus_box:
+                break
+
+            logger.log("PHOTO", f"photo {number}: crop corrected (round {round_no + 1}): {str(res.reason)[:120]}")
+            current = SelectedPhoto(
+                current.image,
+                new_box,
+                current.relevance_score,
+                current.visual_impact_score,
+                current.reason,
+            )
+
+        refined.append(current)
+
+    return refined
+
+
+# ------------------------------------------------------------------ layout planning (AI sees real crops)
+def plan_layout(
+    gem: GeminiClient,
+    article: SourceArticle,
+    photos: list[SelectedPhoto],
+    preferred: str = "auto",
+) -> tuple[str, list[SelectedPhoto]]:
+    """Let the AI choose the layout and photo order after looking at the actual selected crops."""
+    fallback_layout = _layout_name(preferred)
+    count = len(photos)
+
+    if count <= 1:
+        return fallback_layout, photos
+
+    allowed = [
+        "inset_circle_right", "inset_circle_left", "inset_square_right", "inset_square_left",
+        "diptych_split", "diptych_stack",
+    ]
+    if count >= 3:
+        allowed += ["triptych", "triptych_bottom"]
+    if count >= 4:
+        allowed += ["quad_grid"]
+
+    excerpt = (article.article_text or article.description or "")[:1200]
+    prompt = (
+        f"ARTICLE TITLE: {article.original_title}\nARTICLE CONTEXT: {excerpt}\n\n"
+        f"You receive {count} enlarged crops (indices 0..{count - 1}) taken from the article's ORIGINAL photos.\n"
+        f"Choose ONE layout from: {', '.join(allowed)}.\n"
+        "Guidance: inset_* = one dominant main photo plus a small detail photo; diptych_split = two equally strong "
+        "people/perspectives; diptych_stack = before/after or sequence; triptych / triptych_bottom = one main plus two supporting "
+        "details; quad_grid = four equally relevant moments.\n"
+        "Return `order` as all indices sorted by importance: index first in the list becomes the main/hero panel. "
+        "The combined square image must tell the story at a glance with complete, meaningful panels, not random pieces.\n"
+        "Return layout, order, and one short reason sentence. Do not identify people."
+    )
+
+    try:
+        res = gem.generate_json(
+            prompt,
+            LayoutPlanSchema,
+            images=[(_jpeg(_focus_crop(p, (512, 512), context=2.4), 512), "image/jpeg") for p in photos],
+            temperature=0.1,
+            tag="LAYOUT",
+        )
+    except Exception as exc:
+        logger.warn("PHOTO", f"layout planning unavailable ({type(exc).__name__}); using default layout rules")
+        return fallback_layout, photos
+
+    layout = _layout_name(res.layout)
+    if layout not in allowed:
+        layout = fallback_layout if fallback_layout in allowed else "auto"
+
+    order: list[int] = []
+    for raw in res.order or []:
+        try:
+            i = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= i < count and i not in order:
+            order.append(i)
+    for i in range(count):
+        if i not in order:
+            order.append(i)
+
+    logger.log("PHOTO", f"AI layout plan: {layout}, order={order} ({str(res.reason)[:120]})")
+    return layout, [photos[i] for i in order]
 
 
 # ------------------------------------------------------------------ layout helpers
@@ -331,7 +608,7 @@ def compose(photos: list[Image.Image], layout: str = "auto") -> tuple[Image.Imag
     return canvas, 2
 
 
-# ------------------------------------------------------------------ square AI-image layouts
+# ------------------------------------------------------------------ square layouts
 SQUARE_SIDE = 1080
 SQUARE_LAYOUTS = {
     "auto",
@@ -384,12 +661,7 @@ def _paste_square_inset(
 
 
 def compose_square(photos: list[Image.Image], layout: str = "auto") -> tuple[Image.Image, int]:
-    """Compose two or three generated/reference-matched photos on a 1080×1080 canvas.
-
-    No text is rendered. ``triptych`` places one portrait panel beside two stacked
-    panels; ``triptych_bottom`` places two square panels above a wide lower panel.
-    Unknown layouts and incomplete three-photo layouts degrade gracefully.
-    """
+    """Compose two or three photos on a 1080x1080 canvas. No text is rendered."""
     if not photos:
         raise ValueError("no photos to compose")
 
@@ -430,7 +702,6 @@ def compose_square(photos: list[Image.Image], layout: str = "auto") -> tuple[Ima
         return bg, 2
 
     if count < 3:
-        # A triptych needs three distinct photos; a two-photo inset is less destructive.
         fallback = "inset_circle_right"
         canvas = _square_cover(photos[0], (side, side))
         _paste_square_inset(canvas, photos[1], side="right", shape="circle")
@@ -447,7 +718,6 @@ def compose_square(photos: list[Image.Image], layout: str = "auto") -> tuple[Ima
         bg.paste(_square_cover(photos[2], (side, lower_h)), (0, top_h + gap))
         return bg, 3
 
-    # Main vertical frame on the left; two secondary near-square frames on the right.
     main_w = 610
     secondary_w = side - main_w - gap
     secondary_h = (side - gap) // 2
@@ -466,7 +736,10 @@ def _focus_crop(
     *,
     context: float = 2.8,
 ) -> Image.Image:
-    """Crop around the AI-marked region, then resize; all visible pixels come from the source."""
+    """Crop around the AI-marked region, then resize; all visible pixels come from the source.
+
+    The crop never gets so small that it must be upscaled more than ~1.65x (keeps zoomed details sharp).
+    """
     img = selected.image.convert("RGB")
     iw, ih = img.size
     x0, y0, x1, y1 = selected.focus_box
@@ -476,7 +749,8 @@ def _focus_crop(
     focus_h = max(1.0, (y1 - y0) * ih / 1000.0)
     target_ratio = size[0] / size[1]
 
-    crop_w = max(focus_w * context, focus_h * context * target_ratio)
+    min_w = size[0] * 0.6
+    crop_w = max(focus_w * context, focus_h * context * target_ratio, min_w)
     crop_h = crop_w / target_ratio
     if crop_w > iw:
         crop_w, crop_h = float(iw), iw / target_ratio
@@ -488,7 +762,12 @@ def _focus_crop(
     left = min(max(0.0, cx - crop_w / 2), iw - crop_w)
     top = min(max(0.0, cy - crop_h / 2), ih - crop_h)
     crop = img.crop((int(left), int(top), int(left + crop_w), int(top + crop_h)))
-    return ImageOps.fit(crop, size, method=Image.LANCZOS, centering=(0.5, 0.5))
+    result = ImageOps.fit(crop, size, method=Image.LANCZOS, centering=(0.5, 0.5))
+
+    if crop.size[0] < size[0]:
+        result = result.filter(ImageFilter.UnsharpMask(radius=1.2, percent=60, threshold=3))
+
+    return result
 
 
 def _layout_name(value: str) -> str:
@@ -540,8 +819,6 @@ def compose_original_square(
             normalized = "inset_circle_right"
 
     if normalized == "single_hero":
-        # Prefer the user's two-photo minimum when the source offers a second relevant image.
-        # With only one source image, the inset becomes a magnified crop of that same photo.
         normalized = "inset_circle_right"
 
     if normalized == "quad_grid" and count < 4:
