@@ -123,7 +123,8 @@ def test_recovery_no_duplicate_blogger(tmp_path, monkeypatch):
         cache_dir=tmp_path / "cache",
         exports_dir=tmp_path / "exports",
         gemini_api_key="k",
-        target_daily_stories=6,
+        # The first run fills the daily quota; the second must still recover WA.
+        target_daily_stories=1,
         max_stories_per_run=1,
         blogger_blog_id="b",
         twilio_account_sid="AC00000000000000000000000000000000",
@@ -131,7 +132,6 @@ def test_recovery_no_duplicate_blogger(tmp_path, monkeypatch):
         twilio_whatsapp_number="+15550000000",
         your_personal_number="+15550000001",
         image_vlm_check=False,
-        facebook_separate_image=True,
     )
 
     # ─────────────────────────────────────────────
