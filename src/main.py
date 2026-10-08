@@ -469,7 +469,8 @@ class Factory:
         if (
             st.facebook_status != "ready"
             or not cache.facebook
-            or st.blogger_url not in (cache.facebook.post or "")
+            or st.blogger_url not in (cache.facebook.first_comment or "")
+            or st.blogger_url in (cache.facebook.post or "")
         ):
             self._facebook(st, cache, article)
 
@@ -674,7 +675,8 @@ class Factory:
         if (
             st.facebook_status != "ready"
             or not cache.facebook
-            or st.blogger_url not in (cache.facebook.post or "")
+            or st.blogger_url not in (cache.facebook.first_comment or "")
+            or st.blogger_url in (cache.facebook.post or "")
         ):
             problems.append("facebook_package_invalid")
 
