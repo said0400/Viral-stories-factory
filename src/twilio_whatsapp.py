@@ -84,7 +84,7 @@ class WhatsAppClient:
                   f"Blogger:\n{blogger_url}\n\nStatus: {status}\nImage: "
                   f"{'attached (AI generated)' if image_public_url else 'not attached (no public URL)'}")
         
-        fb_msg = f"Facebook Title:\n{fb.title}\n\nFacebook Post:\n{fb.post}"
+        fb_msg = f"Facebook Post (copy-ready):\n{fb.post}"
         comment = f"First Comment:\n{fb.first_comment}"
         
         post_parts = _chunks(fb_msg)
