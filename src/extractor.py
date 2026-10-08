@@ -706,11 +706,10 @@ def is_valid(
         clean_text(article.description or "")
     )
 
-    if article_text_len < min_chars:
-        if description_len < 200:
-            return False, "not enough text to verify the story"
+    if article_text_len < min_chars and description_len < 200:
+        return False, "not enough text to verify the story"
 
-    if article_text_len == 0 and description_len == 0:
+    if article_text_len == 0 and description_len < 200:
         return False, "empty article content"
 
     if not article.normalized_url:
