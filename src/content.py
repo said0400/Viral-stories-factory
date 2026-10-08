@@ -16,6 +16,7 @@ from .models import (
     FactCheckSchema,
     GeneratedContent,
     SourceArticle,
+    ThumbnailBriefSchema,
     TriageItem,
     TriageResult,
 )
@@ -261,6 +262,19 @@ When flagging a problem, quote or identify the smallest exact claim that needs r
 
 Return only claims that genuinely require correction.
 If everything is supported, return an empty unsupported_claims list and all_claims_supported=true."""
+
+THUMBNAIL_SYSTEM = """You are an art director writing ONE precise image-generation prompt (in English) for a professional
+YouTube-style thumbnail of a real news/curiosity story. The image model also receives the real photos from the article as references.
+
+Rules:
+- Base every visual element ONLY on the SOURCE TEXT. Never invent people, objects, places, events or details.
+- Describe the single most compelling, factual moment: the main subject (person/animal/object), their visible expression or pose,
+  the setting, key supporting objects, camera angle, lens feel, lighting, color mood and depth of field.
+- Landscape 16:9 composition, one dominant subject placed large and sharp, uncluttered background, strong focal separation,
+  clean contrast, instantly readable at small size, photorealistic editorial photojournalism look.
+- Keep real faces, apparent age, clothing and identity cues consistent with the reference photos.
+- The image must contain absolutely NO text, letters, numbers, captions, logos, watermarks, arrows, borders or graphic overlays.
+- 90-160 words, one paragraph, no markdown, no URLs, no mention of 'thumbnail text'."""
 
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _PLACEHOLDER_RE = re.compile(r"\{BLOGGER_URL\}")
@@ -530,6 +544,10 @@ def rank_score(item: TriageItem) -> float:
 
 MAX_FIX_ROUNDS = 3
 
+# Keep the FACTCHECK request small enough for Groq's tokens-per-minute limit (Arabic is token-heavy).
+FACT_SOURCE_CHARS = 5500
+FACT_ARTICLE_CHARS = 6500
+
 
 def _clip(text: str, limit: int = 220) -> str:
     return " ".join(str(text or "").split())[:limit]
@@ -562,6 +580,38 @@ def _quality_issues(article: SourceArticle, content: GeneratedContent) -> list[s
         if paragraphs < 4:
             issues.append("Break the article into at least four readable paragraphs.")
     return issues
+
+
+def generate_thumbnail_prompt(
+    gem: GeminiClient,
+    article: SourceArticle,
+    content: GeneratedContent,
+) -> str:
+    """Gemini writes the precise thumbnail image prompt from the verified source facts. Never raises."""
+    text = (article.article_text or article.description or "")[:6000]
+    body = BeautifulSoup(content.blogger_html or "", "lxml").get_text(" ", strip=True)[:2500]
+
+    prompt = (
+        f"SOURCE TITLE: {article.original_title}\n"
+        f"SOURCE TEXT:\n{text}\n\n"
+        f"ARTICLE HEADLINE: {content.blogger_title}\n"
+        f"ARTICLE SUMMARY TEXT:\n{body}\n\n"
+        f"VISUAL HINT: {content.article_scene_idea}\n\n"
+        "Write the single thumbnail image prompt now."
+    )
+
+    try:
+        res = gem.generate_json(
+            prompt,
+            ThumbnailBriefSchema,
+            system=THUMBNAIL_SYSTEM,
+            temperature=0.4,
+            tag="METADATA",
+        )
+        return _strip_urls(res.thumbnail_prompt)[:1800]
+    except Exception as exc:
+        logger.warn("THUMBNAIL", f"thumbnail prompt unavailable ({type(exc).__name__}); using scene idea")
+        return ""
 
 
 def generate_content(
@@ -665,10 +715,10 @@ def fact_check(
     plain = BeautifulSoup(content.blogger_html, "lxml").get_text(" ")
 
     prompt = (
-        f"SOURCE TEXT:\n{(article.article_text or article.description)[:9000]}\n\n"
+        f"SOURCE TEXT:\n{(article.article_text or article.description)[:FACT_SOURCE_CHARS]}\n\n"
         f"ARTICLE TITLE:\n{content.blogger_title}\n\n"
         f"SEO DESCRIPTION:\n{content.seo_description}\n\n"
-        f"ARTICLE BODY:\n{plain[:12000]}\n\n"
+        f"ARTICLE BODY:\n{plain[:FACT_ARTICLE_CHARS]}\n\n"
         f"FACEBOOK TITLE:\n{content.facebook_title}\n\n"
         f"FACEBOOK POST:\n{content.facebook_post}\n\n"
         f"FACEBOOK HASHTAGS:\n{' '.join(content.facebook_hashtags)}\n\n"
@@ -743,5 +793,10 @@ def generate_verified(
 
         if is_title_taken(content.blogger_title):
             raise ValueError("could not obtain a unique title")
+
+    # Written once, after the article is verified, so the thumbnail brief matches the final facts.
+    brief = generate_thumbnail_prompt(gem, article, content)
+    if brief:
+        content = content.model_copy(update={"thumbnail_prompt": brief})
 
     return content
