@@ -16,8 +16,10 @@ from src.models import (
     SourceArticle,
     TriageItem,
     TriageResult,
+    VisualAnalysis,
     VisualSchema,
 )
+from src.gemini_client import ImageGenError
 from src.photo_composer import PhotoAssessmentBatch, PhotoAssessmentSchema
 
 
@@ -186,7 +188,6 @@ def test_dry_run_end_to_end(tmp_path, monkeypatch):
         "fetch_photos",
         lambda *args, **kwargs: [_source_photo(31), _source_photo(32)],
     )
-
     monkeypatch.setattr(
         m.src_mod,
         "load_sources",
@@ -232,7 +233,7 @@ def test_dry_run_end_to_end(tmp_path, monkeypatch):
     f.imgs.provider = FakeProvider()
 
     assert f.run() == 0
-    assert f.imgs.provider.calls == 1  # article only; Facebook uses original source photos
+    assert f.imgs.provider.calls == 1  # article image only; Facebook is source-pixel compositing
     prompt, refs, aspect = f.imgs.provider.requests[0]
     assert len(refs) == 2
     assert aspect == "16:9"
@@ -262,3 +263,58 @@ def test_dry_run_end_to_end(tmp_path, monkeypatch):
         or history_file.read_text(encoding="utf-8").strip()
         in ("", "[]")
     )
+
+
+def test_facebook_source_composite_survives_article_image_provider_failure(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    art = SourceArticle(
+        source_name="Bored Panda",
+        original_title="Cat found in a wall",
+        original_url="https://boredpanda.com/cat-found",
+        normalized_url="https://boredpanda.com/cat-found",
+        discovered_at=now,
+        description="A source description.",
+        article_text="article context " * 40,
+    )
+    monkeypatch.setattr(
+        image_mod,
+        "fetch_photos",
+        lambda *args, **kwargs: [_source_photo(41), _source_photo(42)],
+    )
+
+    class BrokenArticleProvider:
+        calls = 0
+
+        def generate(self, *args, **kwargs):
+            self.calls += 1
+            raise ImageGenError("simulated Cloudflare article-image outage")
+
+    cfg = dataclasses.replace(
+        Settings(),
+        dry_run=True,
+        data_dir=tmp_path,
+        image_vlm_check=False,
+        gemini_api_key="k",
+    )
+    generator = image_mod.ImageGenerator(cfg, FakeGemini(), fetcher=object())
+    provider = BrokenArticleProvider()
+    generator.provider = provider
+
+    result = generator.generate(
+        story_id="source-only-test",
+        article=art,
+        v=VisualAnalysis(summary="cat story", subject_type="animal"),
+        title="Test title",
+        article_scene="cat",
+        facebook_scene="cat",
+        source_ref=None,
+        source_url="",
+        source_sha="",
+        source_ahash="",
+        known=[],
+    )
+
+    assert not result.path
+    assert result.facebook_path
+    assert Image.open(result.facebook_path).size == (1080, 1080)
+    assert provider.calls > 0
