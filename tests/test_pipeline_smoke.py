@@ -67,6 +67,7 @@ class FakeGemini:
                 labels=["غرائب"],
                 facebook_title="عنوان فيسبوك",
                 facebook_post="منشور فيسبوك طويل بما يكفي لإثارة الفضول دون كشف النهاية.",
+                facebook_hashtags=["#قصة", "#غرائب", "#قصص_حقيقية"],
                 first_comment_hook="التفاصيل هنا",
                 article_scene_idea="a cozy street",
                 facebook_scene_idea="a market",
@@ -152,9 +153,11 @@ def _source_photo(seed=0):
 class FakeProvider:
     def __init__(self):
         self.calls = 0
+        self.requests = []
 
     def generate(self, prompt, refs, aspect):
         self.calls += 1
+        self.requests.append((prompt, refs, aspect))
         return _png(self.calls), "image/png"
 
 
@@ -230,6 +233,11 @@ def test_dry_run_end_to_end(tmp_path, monkeypatch):
 
     assert f.run() == 0
     assert f.imgs.provider.calls == 1  # article only; Facebook uses original source photos
+    prompt, refs, aspect = f.imgs.provider.requests[0]
+    assert len(refs) == 2
+    assert aspect == "16:9"
+    assert "YouTube-style editorial thumbnail" in prompt
+    assert "absolutely no written characters" in prompt
 
     previews = list(
         (tmp_path / "dry_run").glob("*.json")
