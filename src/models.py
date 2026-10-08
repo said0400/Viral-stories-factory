@@ -46,6 +46,7 @@ class GeneratedContent(BaseModel):
     labels: list[str]
     facebook_title: str
     facebook_post: str          # no URL inside; URL is added after Blogger succeeds
+    facebook_hashtags: list[str] = Field(default_factory=list)
     first_comment_hook: str
     article_scene_idea: str
     facebook_scene_idea: str          # Main Photo (Background)
@@ -208,6 +209,7 @@ class ContentSchema(BaseModel):
     labels: list[str]
     facebook_title: str
     facebook_post: str
+    facebook_hashtags: list[str]
     first_comment_hook: str
     article_scene_idea: str
     facebook_scene_idea: str
@@ -225,6 +227,7 @@ class EditorialMetadataSchema(BaseModel):
     labels: list[str]
     facebook_title: str
     facebook_post: str
+    facebook_hashtags: list[str]
     first_comment_hook: str
     article_scene_idea: str
     facebook_scene_idea: str
