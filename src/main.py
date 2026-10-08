@@ -23,7 +23,7 @@ from .image_generator import ImageGenerator
 from .image_publisher import publish_images
 from .llm_router import LLMRouter
 from .logger import error, log, setup_logging, warn
-from .models import SourceArticle, StoryCache, StoryState
+from .models import ImageResult, SourceArticle, StoryCache, StoryState
 from .twilio_whatsapp import WhatsAppClient, WhatsAppError
 from .utils import PoliteFetcher, atomic_write_json, git_commit_and_push, iso, make_story_id, utcnow
 
@@ -46,6 +46,11 @@ def data_uri(path: str) -> str:
 def _is_file(path: str | None) -> bool:
     """Path('') is '.', which exists - so empty strings must be rejected explicitly."""
     return bool(path) and Path(str(path)).is_file()
+
+
+def _has_any_image(image: ImageResult | None) -> bool:
+    """IMAGE_REQUIRED means at least one independent image artifact is available."""
+    return bool(image and (_is_file(image.path) or _is_file(image.facebook_path)))
 
 
 class Factory:
@@ -453,11 +458,9 @@ class Factory:
                     known=self.hist.image_hashes(),
                 )
 
-                if self.cfg.image_required and not (
-                    cache.image and _is_file(cache.image.path)
-                ):
+                if self.cfg.image_required and not _has_any_image(cache.image):
                     raise ImageGenError(
-                        "article image provider failed; the Facebook source-photo image was preserved"
+                        "neither the article image nor the Facebook source-photo image is available"
                     )
 
             except (ImageGenError, GeminiError) as exc:
@@ -470,11 +473,14 @@ class Factory:
                 if self.cfg.image_required:
                     raise StoryFailed("image", str(exc)) from exc
 
-                warn(tag, "image failed; continuing without image (IMAGE_REQUIRED=false)")
+                warn(tag, "both images are unavailable; continuing because IMAGE_REQUIRED=false")
 
             else:
                 article_image_ok = bool(cache.image and _is_file(cache.image.path))
-                st.image_status = "generated" if article_image_ok else "failed"
+                facebook_image_ok = bool(cache.image and _is_file(cache.image.facebook_path))
+                st.image_status = (
+                    "generated" if article_image_ok else "facebook_only" if facebook_image_ok else "failed"
+                )
                 if article_image_ok:
                     st.image_generated_at = iso()
                     st.subject_type = cache.visual.subject_type
@@ -486,7 +492,11 @@ class Factory:
                     st.generated_image_hash = cache.image.generated_hash
                     st.generated_image_ahash = cache.image.generated_ahash
                 else:
-                    warn(tag, "article image unavailable; source-photo Facebook image remains available")
+                    warn(
+                        tag,
+                        "article image unavailable; "
+                        + ("Facebook source-photo image remains available" if facebook_image_ok else "no image is available"),
+                    )
 
                 if not self.dry:
                     if article_image_ok and st.status in (H.SELECTED, H.GENERATED, H.IMAGE_FAILED):
@@ -564,21 +574,22 @@ class Factory:
 
         has_image = bool(img and _is_file(img.path))
 
-        if self.cfg.image_required and not has_image:
-            raise StoryFailed("validate", "valid image missing")
+        if self.cfg.image_required and not _has_any_image(img):
+            raise StoryFailed("validate", "both article and Facebook images are unavailable")
 
         image_url = ""
 
-        if has_image:
-            urls = publish_images(self.cfg, [img.path, img.facebook_path], st.story_id)
+        if img:
+            paths = [path for path in (img.path, img.facebook_path) if _is_file(path)]
+            if paths:
+                urls = publish_images(self.cfg, paths, st.story_id)
+                img.public_url = urls.get(img.path, "") if has_image else ""
+                img.facebook_public_url = urls.get(img.facebook_path, "") if _is_file(img.facebook_path) else ""
 
-            img.public_url = urls.get(img.path, "")
-            img.facebook_public_url = urls.get(img.facebook_path, "")
-
-            image_url = img.public_url or data_uri(img.path)
-
-            if not img.public_url:
-                warn("IMAGE", "using inline image in Blogger (no public URL)")
+            if has_image:
+                image_url = img.public_url or data_uri(img.path)
+                if not img.public_url:
+                    warn("IMAGE", "using inline image in Blogger (no public URL)")
 
         html = editorial.render_blogger_html(content, art, image_url, st.story_id)
 
@@ -723,7 +734,7 @@ class Factory:
         if not cache.content:
             problems.append("content_invalid")
 
-        if self.cfg.image_required and st.image_status != "generated":
+        if self.cfg.image_required and not _has_any_image(cache.image):
             problems.append("image_invalid")
 
         if not cache.image or not _is_file(cache.image.facebook_path):
