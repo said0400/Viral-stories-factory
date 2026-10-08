@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import tempfile
 import time
@@ -14,7 +16,7 @@ from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
 
 import requests
@@ -331,6 +333,7 @@ class PoliteFetcher:
         self.respect_robots = respect_robots
 
         self.session = requests.Session()
+        self.session.trust_env = False
 
         self.session.headers.update(
             {
@@ -341,6 +344,43 @@ class PoliteFetcher:
 
         self._robots: dict[str, RobotFileParser | None] = {}
         self._last: dict[str, float] = {}
+
+    @staticmethod
+    def _validate_public_http_url(url: str) -> str:
+        """Reject non-HTTP and non-public destinations before making a request."""
+        try:
+            parsed = urlparse(str(url or "").strip())
+            host = (parsed.hostname or "").lower().rstrip(".")
+            port = parsed.port
+        except ValueError as exc:
+            raise FetchError("invalid URL") from exc
+
+        if parsed.scheme.lower() not in {"http", "https"} or not host:
+            raise FetchError("only absolute HTTP(S) URLs are allowed")
+        if parsed.username is not None or parsed.password is not None:
+            raise FetchError("credentials in URLs are not allowed")
+        if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+            raise FetchError("local hostnames are not allowed")
+
+        try:
+            addresses = {ipaddress.ip_address(host)}
+        except ValueError:
+            try:
+                results = socket.getaddrinfo(
+                    host,
+                    port or (443 if parsed.scheme.lower() == "https" else 80),
+                    type=socket.SOCK_STREAM,
+                )
+                addresses = {
+                    ipaddress.ip_address(item[4][0].split("%", 1)[0])
+                    for item in results
+                }
+            except (OSError, ValueError) as exc:
+                raise FetchError("URL host could not be resolved safely") from exc
+
+        if not addresses or any(not address.is_global for address in addresses):
+            raise FetchError("private, loopback, and link-local destinations are not allowed")
+        return str(url).strip()
 
     def _robot_for(
         self,
@@ -368,7 +408,7 @@ class PoliteFetcher:
             r = self.session.get(
                 base + "/robots.txt",
                 timeout=self.timeout,
-                allow_redirects=True,
+                allow_redirects=False,
             )
 
             if r.status_code == 200:
@@ -446,83 +486,64 @@ class PoliteFetcher:
         binary: bool = False,
         check_robots: bool = True,
     ) -> requests.Response:
-        if not url:
-            raise FetchError("empty URL")
+        current = self._validate_public_http_url(url)
+        redirect_codes = {301, 302, 303, 307, 308}
 
-        if check_robots and not self.allowed(url):
-            raise RobotsDisallowed(
-                f"robots.txt disallows {url}"
+        for redirect_count in range(6):
+            current = self._validate_public_http_url(current)
+            if check_robots and not self.allowed(current):
+                raise RobotsDisallowed(f"robots.txt disallows {current}")
+
+            host = urlparse(current).netloc
+            wait = self.crawl_delay(current) - (
+                time.monotonic() - self._last.get(host, 0)
             )
+            if wait > 0:
+                time.sleep(wait)
 
-        try:
-            host = urlparse(url).netloc
-        except ValueError as exc:
-            raise FetchError(
-                f"invalid URL: {url}"
-            ) from exc
-
-        if not host:
-            raise FetchError(
-                f"invalid URL: {url}"
-            )
-
-        wait = self.crawl_delay(url) - (
-            time.monotonic()
-            - self._last.get(host, 0)
-        )
-
-        if wait > 0:
-            time.sleep(wait)
-
-        for attempt in range(2):
-            try:
-                r = self.session.get(
-                    url,
-                    timeout=self.timeout,
-                    allow_redirects=True,
-                )
-
-            except requests.RequestException as exc:
-                self._last[host] = time.monotonic()
-
-                raise FetchError(
-                    f"{type(exc).__name__}: {url}"
-                ) from exc
-
-            self._last[host] = time.monotonic()
-
-            if r.status_code in (429, 503) and attempt == 0:
-                retry_after = r.headers.get(
-                    "Retry-After",
-                    "",
-                ).strip()
-
-                if retry_after.isdigit():
-                    # Increased minimum delay to 15s to respect rate limits better
-                    delay = min(
-                        60,
-                        max(15, int(retry_after)),
+            redirected = False
+            for attempt in range(2):
+                try:
+                    r = self.session.get(
+                        current,
+                        timeout=self.timeout,
+                        allow_redirects=False,
                     )
-                else:
-                    delay = 15
+                except requests.RequestException as exc:
+                    self._last[host] = time.monotonic()
+                    raise FetchError(f"{type(exc).__name__}: {current}") from exc
 
-                r.close()
-                time.sleep(delay)
-                continue
+                self._last[host] = time.monotonic()
+                if r.status_code in redirect_codes:
+                    location = r.headers.get("Location", "").strip()
+                    r.close()
+                    if not location:
+                        raise FetchError("redirect response has no Location header")
+                    current = self._validate_public_http_url(urljoin(current, location))
+                    redirected = True
+                    break
 
-            if r.status_code >= 400:
-                status = r.status_code
-                r.close()
+                if r.status_code in (429, 503) and attempt == 0:
+                    retry_after = r.headers.get("Retry-After", "").strip()
+                    delay = min(60, max(15, int(retry_after))) if retry_after.isdigit() else 15
+                    r.close()
+                    time.sleep(delay)
+                    continue
 
-                raise FetchError(
-                    f"HTTP {status}: {url}"
-                )
+                if 300 <= r.status_code < 400:
+                    status = r.status_code
+                    r.close()
+                    raise FetchError(f"unexpected redirect status HTTP {status}")
+                if r.status_code >= 400:
+                    status = r.status_code
+                    r.close()
+                    raise FetchError(f"HTTP {status}: {current}")
+                return r
 
-            return r
+            if not redirected:
+                raise FetchError(f"rate limited: {current}")
 
-        raise FetchError(
-            f"rate limited: {url}"
-        )
+        raise FetchError("too many redirects")
 
 
 # ---------------------------------------------------------------------------
