@@ -18,6 +18,7 @@ from src.models import (
 from src.photo_composer import (
     PhotoAssessmentBatch,
     PhotoAssessmentSchema,
+    SelectedPhoto,
     analyze_source_photos,
     compose_original_square,
     compose_square,
@@ -125,6 +126,7 @@ def _content(
         labels=["غرائب"],
         facebook_title="عنوان",
         facebook_post=post,
+        facebook_hashtags=["#قصص_حقيقية", "#غرائب", "#قصة"],
         first_comment_hook="التفاصيل هنا",
         article_scene_idea="a",
         facebook_scene_idea="b",
@@ -138,7 +140,9 @@ def test_facebook_requires_real_blogger_url():
         "https://src.com/a",
     )
 
-    assert "blogspot.com" in ok.post
+    assert "blogspot.com" not in ok.post
+    assert ok.post.startswith("عنوان\n\n")
+    assert "#قصص_حقيقية" in ok.post
     assert "blogspot.com" in ok.first_comment
 
     for bad in (
@@ -297,8 +301,25 @@ def test_original_photo_analysis_selects_and_enlarges_story_focus():
 
     canvas, used = compose_original_square(selected, "INSET_CIRCLE_RIGHT")
     assert canvas.size == (1080, 1080)
-    assert used == 2
+    assert used == 1  # the unrelated background image falls below the relevance threshold
     assert canvas.getpixel((540, 900)) == (220, 30, 20)
+
+
+def test_original_photo_quad_grid_uses_four_focus_crops():
+    selected = [
+        SelectedPhoto(
+            Image.new("RGB", (800, 600), color),
+            (250, 180, 750, 820),
+            90 - i,
+            85 - i,
+            f"photo {i}",
+        )
+        for i, color in enumerate(((220, 20, 20), (20, 220, 20), (20, 20, 220), (220, 220, 20)))
+    ]
+    canvas, used = compose_original_square(selected, "QUAD_GRID")
+    assert canvas.size == (1080, 1080)
+    assert used == 4
+    assert canvas.getpixel((100, 100)) != canvas.getpixel((1000, 1000))
 
 
 def _img(color, noise=False):
