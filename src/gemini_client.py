@@ -325,7 +325,7 @@ class GeminiClient:
         for key_index in key_indices:
             try:
                 self._activate_key(key_index)
-            except Exception as exc:
+            except Exception:
                 self._exhausted_keys.add(key_index)
                 last = GeminiError(f"Could not initialize {self._api_keys[key_index][0]}")
                 logger.warn(tag, f"{self._api_keys[key_index][0]} could not be initialized; trying the next key")
