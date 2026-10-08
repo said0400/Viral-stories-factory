@@ -133,6 +133,33 @@ class History:
                     "skipped an invalid history row",
                 )
 
+    def sanitize_cached_sources(self) -> int:
+        """Redact legacy source bodies in persisted cache files; return files changed."""
+        changed = 0
+        if not self.cache_dir.exists():
+            return changed
+
+        for path in self.cache_dir.glob("*.json"):
+            try:
+                cache = StoryCache.model_validate_json(path.read_text(encoding="utf-8"))
+            except Exception:
+                logger.warn("HISTORY", f"cache file {path.name} could not be migrated")
+                continue
+
+            if cache.article and (
+                cache.article.article_text or len(cache.article.description) > 500
+            ):
+                cache.article = cache.article.model_copy(
+                    update={
+                        "article_text": "",
+                        "description": cache.article.description[:500],
+                    }
+                )
+                atomic_write_json(path, cache.model_dump(mode="json"))
+                changed += 1
+
+        return changed
+
     def save(self) -> None:
         atomic_write_json(
             self.path,
@@ -490,9 +517,20 @@ class History:
         story_id: str,
         cache: StoryCache,
     ) -> None:
+        # The repository may be public (for raw image hosting). Preserve the
+        # metadata and generated work needed for recovery, but never commit a
+        # full third-party source article into the per-story cache.
+        stored = cache.model_copy(deep=True)
+        if stored.article:
+            stored.article = stored.article.model_copy(
+                update={
+                    "article_text": "",
+                    "description": stored.article.description[:500],
+                }
+            )
         atomic_write_json(
             self._cache_path(story_id),
-            cache.model_dump(
+            stored.model_dump(
                 mode="json"
             ),
         )
