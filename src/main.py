@@ -389,6 +389,17 @@ class Factory:
 
         if need_image:
             try:
+                # Stories cached before the thumbnail brief existed get one now (never raises).
+                if not content.thumbnail_prompt:
+                    brief = editorial.generate_thumbnail_prompt(self.llm, article, content)
+
+                    if brief:
+                        content = content.model_copy(update={"thumbnail_prompt": brief})
+                        cache.content = content
+
+                        if not self.dry:
+                            self.hist.save_cache(st.story_id, cache)
+
                 ref = None
 
                 if not cache.visual:
@@ -413,6 +424,7 @@ class Factory:
                     facebook_scene=content.facebook_scene_idea,
                     facebook_detail_scene=content.facebook_detail_scene_idea,
                     facebook_composition_type=content.facebook_composition_type,
+                    thumbnail_prompt=content.thumbnail_prompt,
                     source_ref=(ref[0], ref[1]) if ref else None,
                     source_url=ref[2] if ref else "",
                     source_sha=ref[3] if ref else "",
