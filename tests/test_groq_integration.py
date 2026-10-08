@@ -327,5 +327,48 @@ def test_groq_uses_task_specific_completion_budgets(monkeypatch):
     client = GroqClient(Settings(groq_api_key="secret", groq_model="test-model"))
     for tag in ("ARTICLE", "TRIAGE", "METADATA", "FACTCHECK"):
         client.generate_json("short request", ResultSchema, tag=tag)
-
     assert [budget for _, budget in budgets] == [4096, 4096, 2048, 1024]
+
+
+def test_fact_check_prompt_is_bounded_for_long_source_and_draft():
+    from datetime import datetime, timezone
+
+    from src.content import FACT_ARTICLE_CHARS, FACT_SOURCE_CHARS, fact_check
+    from src.models import FactCheckSchema, GeneratedContent, SourceArticle
+
+    class CapturingGem:
+        prompt = ""
+
+        def generate_json(self, prompt, schema, **_kwargs):
+            self.prompt = prompt
+            return schema(all_claims_supported=True, unsupported_claims=[])
+
+    article = SourceArticle(
+        source_name="Test",
+        original_title="Test story",
+        original_url="https://example.com/story",
+        normalized_url="https://example.com/story",
+        discovered_at=datetime.now(timezone.utc),
+        article_text="SOURCE_CAP_SENTENCE " * 1000,
+    )
+    content = GeneratedContent(
+        blogger_title="Title",
+        blogger_html="<p>" + "ARTICLE_CAP_SENTENCE " * 1000 + "</p>",
+        seo_description="Description",
+        labels=["story"],
+        facebook_title="Facebook title",
+        facebook_post="Facebook post",
+        first_comment_hook="Comment",
+        article_scene_idea="scene",
+        facebook_scene_idea="scene",
+    )
+    gem = CapturingGem()
+
+    result = fact_check(gem, article, content)
+
+    assert isinstance(result, FactCheckSchema)
+    assert FACT_SOURCE_CHARS == 2500
+    assert FACT_ARTICLE_CHARS == 3000
+    assert len(gem.prompt) < 9000
+    assert gem.prompt.count("SOURCE_CAP_SENTENCE") <= 125
+    assert gem.prompt.count("ARTICLE_CAP_SENTENCE") <= 150
