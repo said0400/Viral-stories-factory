@@ -13,6 +13,7 @@ from src.models import (
     EditorialMetadataSchema,
     FactCheckSchema,
     ImageCheckSchema,
+    ImageResult,
     SourceArticle,
     TriageItem,
     TriageResult,
@@ -318,3 +319,142 @@ def test_facebook_source_composite_survives_article_image_provider_failure(tmp_p
     assert result.facebook_path
     assert Image.open(result.facebook_path).size == (1080, 1080)
     assert provider.calls > 0
+
+
+def test_article_image_survives_facebook_source_photo_failure(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    art = SourceArticle(
+        source_name="Bored Panda",
+        original_title="Cat found in a wall",
+        original_url="https://boredpanda.com/cat-found",
+        normalized_url="https://boredpanda.com/cat-found",
+        discovered_at=now,
+        article_text="article context " * 40,
+    )
+    monkeypatch.setattr(image_mod, "fetch_photos", lambda *args, **kwargs: [])
+    cfg = dataclasses.replace(
+        Settings(),
+        dry_run=True,
+        data_dir=tmp_path,
+        image_vlm_check=False,
+        gemini_api_key="k",
+    )
+    generator = image_mod.ImageGenerator(cfg, FakeGemini(), fetcher=object())
+    provider = FakeProvider()
+    generator.provider = provider
+
+    result = generator.generate(
+        story_id="article-only-test",
+        article=art,
+        v=VisualAnalysis(summary="cat story", subject_type="animal"),
+        title="Test title",
+        article_scene="cat",
+        facebook_scene="cat",
+        source_ref=None,
+        source_url="",
+        source_sha="",
+        source_ahash="",
+        known=[],
+    )
+
+    assert result.path
+    assert Image.open(result.path).size[0] >= 512
+    assert not result.facebook_path
+    assert provider.calls == 1
+
+
+def test_image_required_helper_accepts_either_saved_image(tmp_path):
+    article_image = tmp_path / "article.jpg"
+    facebook_image = tmp_path / "facebook.jpg"
+    article_image.write_bytes(b"article")
+    facebook_image.write_bytes(b"facebook")
+
+    assert m._has_any_image(ImageResult(facebook_path=str(facebook_image)))
+    assert m._has_any_image(ImageResult(path=str(article_image)))
+    assert not m._has_any_image(ImageResult())
+
+
+def test_cloudflare_credentials_are_not_required_for_original_facebook_image():
+    cfg = dataclasses.replace(
+        Settings(),
+        dry_run=True,
+        dry_run_generate_images=True,
+        image_required=True,
+        image_provider="cloudflare",
+        cloudflare_account_id="",
+        cloudflare_api_token="",
+    )
+
+    assert not any("CLOUDFLARE_ACCOUNT_ID" in problem for problem in cfg.validate())
+    assert any("original-photo Facebook image" in warning for warning in cfg.warnings())
+
+
+def test_blogger_accepts_facebook_only_image_when_image_is_required(tmp_path, monkeypatch):
+    from src.models import BloggerResult, GeneratedContent, StoryCache, StoryState
+
+    facebook_image = tmp_path / "facebook.jpg"
+    facebook_image.write_bytes(b"facebook")
+    cfg = dataclasses.replace(Settings(), image_required=True)
+
+    class FakeHistory:
+        def set_status(self, *_args, **_kwargs):
+            pass
+
+        def save_cache(self, *_args, **_kwargs):
+            pass
+
+    class FakeBlogger:
+        def publish(self, **kwargs):
+            assert "<img" not in kwargs["html"]
+            return BloggerResult(
+                post_id="post-1",
+                url="https://blog.example/post",
+                published_at="now",
+            )
+
+    monkeypatch.setattr(
+        m,
+        "publish_images",
+        lambda _cfg, paths, _story_id: {paths[0]: "https://cdn.example/facebook.jpg"},
+    )
+    monkeypatch.setattr(m.editorial, "render_blogger_html", lambda *_args: "<p>story</p>")
+
+    factory = m.Factory.__new__(m.Factory)
+    factory.cfg = cfg
+    factory.hist = FakeHistory()
+    factory.blogger = FakeBlogger()
+    factory._push_state = lambda *_args: None
+    content = GeneratedContent(
+        blogger_title="Title",
+        blogger_html="<p>" + "story " * 40 + "</p>",
+        seo_description="Description",
+        labels=["story"],
+        facebook_title="Facebook title",
+        facebook_post="Facebook post",
+        first_comment_hook="Comment",
+        article_scene_idea="scene",
+        facebook_scene_idea="scene",
+    )
+    cache = StoryCache(
+        content=content,
+        image=ImageResult(path="", facebook_path=str(facebook_image)),
+    )
+    state = StoryState(
+        story_id="story-only-facebook",
+        source="source",
+        original_url="https://source.example/story",
+        normalized_url="https://source.example/story",
+        original_title="Story",
+    )
+    article = SourceArticle(
+        source_name="source",
+        original_title="Story",
+        original_url="https://source.example/story",
+        normalized_url="https://source.example/story",
+        discovered_at=datetime.now(timezone.utc),
+    )
+
+    factory._publish_blogger(state, cache, article)
+
+    assert state.blogger_url == "https://blog.example/post"
+    assert cache.image.facebook_public_url == "https://cdn.example/facebook.jpg"
