@@ -557,6 +557,11 @@ def _claims(check: FactCheckSchema) -> list[str]:
     return [str(c).strip() for c in (check.unsupported_claims or []) if str(c).strip()]
 
 
+def _fact_check_passes(check: FactCheckSchema) -> bool:
+    """Reject contradictory provider output instead of trusting an empty list alone."""
+    return bool(check.all_claims_supported) and not _claims(check)
+
+
 def _quality_issues(article: SourceArticle, content: GeneratedContent) -> list[str]:
     """Lightweight structure checks; never demand padding from thin source material."""
     issues: list[str] = []
@@ -567,7 +572,7 @@ def _quality_issues(article: SourceArticle, content: GeneratedContent) -> list[s
     if not 3 <= len(content.facebook_hashtags) <= 5:
         issues.append("Provide three to five relevant, concise Facebook hashtags.")
 
-    source_words = len(re.findall(r"\S+", article.article_text or article.description or ""))
+    source_words = len(re.findall(r"\S+", " ".join((article.article_text or "", article.description or ""))))
     body = BeautifulSoup(content.blogger_html or "", "lxml")
     article_words = len(re.findall(r"\S+", body.get_text(" ", strip=True)))
     if source_words >= 350:
@@ -588,7 +593,9 @@ def generate_thumbnail_prompt(
     content: GeneratedContent,
 ) -> str:
     """Gemini writes the precise thumbnail image prompt from the verified source facts. Never raises."""
-    text = (article.article_text or article.description or "")[:6000]
+    text = "\n\n".join(
+        part for part in (article.article_text.strip(), article.description.strip()) if part
+    )[:6000]
     body = BeautifulSoup(content.blogger_html or "", "lxml").get_text(" ", strip=True)[:2500]
 
     prompt = (
@@ -621,7 +628,12 @@ def generate_content(
     feedback: str = "",
     previous: GeneratedContent | None = None,
 ) -> GeneratedContent:
-    text = article.article_text or article.description
+    source_parts = []
+    if article.article_text.strip():
+        source_parts.append("ARTICLE BODY:\n" + article.article_text.strip())
+    if article.description.strip():
+        source_parts.append("SOURCE DESCRIPTION:\n" + article.description.strip())
+    text = "\n\n".join(source_parts)
     date = article.publication_date.date() if article.publication_date else "unknown"
 
     prompt = (
@@ -713,9 +725,12 @@ def fact_check(
     content: GeneratedContent,
 ) -> FactCheckSchema:
     plain = BeautifulSoup(content.blogger_html, "lxml").get_text(" ")
+    source_text = "\n\n".join(
+        part for part in (article.article_text.strip(), article.description.strip()) if part
+    )
 
     prompt = (
-        f"SOURCE TEXT:\n{(article.article_text or article.description)[:FACT_SOURCE_CHARS]}\n\n"
+        f"SOURCE TEXT:\n{source_text[:FACT_SOURCE_CHARS]}\n\n"
         f"ARTICLE TITLE:\n{content.blogger_title}\n\n"
         f"SEO DESCRIPTION:\n{content.seo_description}\n\n"
         f"ARTICLE BODY:\n{plain[:FACT_ARTICLE_CHARS]}\n\n"
@@ -744,6 +759,8 @@ def generate_verified(
     for round_no in range(MAX_FIX_ROUNDS + 1):
         check = fact_check(gem, article, content)
         claims = _claims(check)
+        if not check.all_claims_supported and not claims:
+            claims = ["Fact checker reported unsupported claims but returned no details; recheck the complete draft."]
         structure_issues = _quality_issues(article, content)
 
         if not claims and not structure_issues:
@@ -786,10 +803,15 @@ def generate_verified(
             previous=content,
         )
 
-        final_claims = _claims(fact_check(gem, article, content))
+        final_check = fact_check(gem, article, content)
+        final_claims = _claims(final_check)
+        if not _fact_check_passes(final_check):
+            detail = "; ".join(final_claims[:3]) or "the fact-check result was inconsistent"
+            raise ValueError(f"title regeneration failed fact-check: {detail}")
 
-        if final_claims:
-            raise ValueError("title regeneration produced unsupported claims")
+        final_structure_issues = _quality_issues(article, content)
+        if final_structure_issues:
+            raise ValueError("title regeneration failed structure checks: " + "; ".join(final_structure_issues))
 
         if is_title_taken(content.blogger_title):
             raise ValueError("could not obtain a unique title")
