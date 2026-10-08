@@ -653,10 +653,15 @@ class ImageGenerator:
         source_ahash: str,
         known: list[tuple[str, str]],
     ) -> ImageResult:
-        # Fetch the article's editorial images once. Groq ranks each candidate and
-        # marks a source-pixel crop; the same vetted set feeds the article thumbnail
-        # references and the non-generative Facebook composite.
-        source_photos = fetch_photos(article, self.fetcher, limit=8) if self.fetcher else []
+        # Prepare original source photos for Facebook and as optional article-image
+        # references. Failure here must not block the independent article image.
+        source_photos: list[Image.Image] = []
+        if self.fetcher:
+            try:
+                source_photos = fetch_photos(article, self.fetcher, limit=8)
+            except Exception as exc:
+                logger.warn("PHOTO", f"source-photo download failed ({type(exc).__name__}); continuing with article image")
+
         if source_ref:
             try:
                 ref_img = Image.open(io.BytesIO(source_ref[0])).convert("RGB")
@@ -666,18 +671,36 @@ class ImageGenerator:
             except Exception as exc:
                 logger.warn("PHOTO", f"source reference could not be decoded ({type(exc).__name__})")
 
-        selected_source_photos = (
-            analyze_source_photos(self.gem, article, source_photos, limit=4)
-            if source_photos
-            else []
-        )
-        if selected_source_photos:
-            # Feedback loop: the AI checks its own crop boxes and corrects them before use.
-            selected_source_photos = refine_focus_boxes(self.gem, article, selected_source_photos)
+        selected_source_photos: list[SelectedPhoto] = []
+        if source_photos:
+            try:
+                selected_source_photos = analyze_source_photos(self.gem, article, source_photos, limit=4)
+                if selected_source_photos:
+                    # Feedback loop: the AI checks its own crop boxes and corrects them before use.
+                    selected_source_photos = refine_focus_boxes(self.gem, article, selected_source_photos)
+            except Exception as exc:
+                logger.warn("PHOTO", f"source-photo analysis failed ({type(exc).__name__}); using the first original photo")
+
+            if not selected_source_photos:
+                selected_source_photos = [
+                    SelectedPhoto(
+                        source_photos[0],
+                        (0, 0, 1000, 1000),
+                        50,
+                        50,
+                        "first original article photo fallback",
+                    )
+                ]
 
         # Build Facebook first, exclusively from article pixels. This path does
-        # not call ImageProvider, Cloudflare, or an image-generation model.
+        # not call ImageProvider, Cloudflare, or an image-generation model. If it
+        # fails, continue and still attempt the separate article image.
         fb_out = self.cfg.images_dir / f"{story_id}_facebook.jpg"
+        fb_path = ""
+        fb_sha = ""
+        fb_ah = ""
+        fb_used = ""
+        fb_error = ""
         try:
             fb_sha, fb_ah, fb_used = self._facebook_original_composite(
                 article=article,
@@ -686,8 +709,13 @@ class ImageGenerator:
                 candidate_count=len(source_photos),
                 out_path=fb_out,
             )
-        except ImageGenError as exc:
-            raise ImageGenError(f"Facebook source-photo composition failed (no AI fallback): {exc}") from exc
+            fb_path = str(fb_out)
+        except Exception as exc:
+            fb_error = type(exc).__name__
+            logger.warn(
+                "PHOTO",
+                f"Facebook source-photo composition failed ({fb_error}); continuing with article image",
+            )
 
         article_refs = [to_reference(photo.image) for photo in selected_source_photos[:3]]
         if not article_refs and source_ref:
@@ -747,20 +775,31 @@ class ImageGenerator:
                 extra_refs=article_extra_refs,
                 thumbnail_brief=thumbnail_prompt,
             )
-        except (ImageGenError, GeminiError) as exc:
-            logger.warn("IMAGE", f"article image failed after Facebook source composite was saved ({type(exc).__name__})")
+        except Exception as exc:
+            article_error = type(exc).__name__
+            logger.warn(
+                "IMAGE",
+                f"article image failed ({article_error}); Facebook source image "
+                f"{'is available' if fb_path else 'is unavailable'}",
+            )
+            notes = (
+                f"article_image_error={article_error}; facebook_mode=source_pixels_only; "
+                f"facebook_generation={fb_used or 'unavailable'}"
+            )
+            if fb_error:
+                notes += f"; facebook_error={fb_error}"
             return ImageResult(
                 path="",
-                facebook_path=str(fb_out),
+                facebook_path=fb_path,
                 strategy=strategy,
                 style=style,
                 identity_confidence=confidence,
-                facebook_image_hash=fb_sha,
-                facebook_image_ahash=fb_ah,
+                facebook_image_hash=fb_sha if fb_path else "",
+                facebook_image_ahash=fb_ah if fb_path else "",
                 source_image_url=source_url,
                 source_image_hash=source_sha,
                 source_image_ahash=source_ahash,
-                notes=f"article_image_error={type(exc).__name__}; facebook_generation={fb_used}; facebook_mode=source_pixels_only",
+                notes=notes,
             )
 
         res = ImageResult(
@@ -778,13 +817,17 @@ class ImageGenerator:
                 f"mode={self.cfg.image_mode}; provider={self.cfg.image_provider}; used={article_used}; "
                 f"reference_used={'yes' if reference_used else 'no'}; "
                 f"thumbnail_brief={'yes' if thumbnail_prompt.strip() else 'no'}; "
-                "facebook_mode=source_pixels_only"
+                "facebook_mode=source_pixels_only; "
+                f"facebook_generation={fb_used or 'unavailable'}"
             ),
         )
 
-        res.facebook_path = str(fb_out)
-        res.facebook_image_hash = fb_sha
-        res.facebook_image_ahash = fb_ah
-        res.notes += f"; facebook_layout={self.cfg.facebook_layout or facebook_composition_type}; facebook_generation={fb_used}"
+        res.facebook_path = fb_path
+        res.facebook_image_hash = fb_sha if fb_path else ""
+        res.facebook_image_ahash = fb_ah if fb_path else ""
+        if fb_path:
+            res.notes += f"; facebook_layout={self.cfg.facebook_layout or facebook_composition_type}"
+        if fb_error:
+            res.notes += f"; facebook_error={fb_error}"
 
         return res
