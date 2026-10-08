@@ -91,7 +91,7 @@ class Settings:
     cinematic_style: str = DEFAULT_CINEMATIC_STYLE
     facebook_layout: str = "auto"           # auto | insets | diptychs | triptychs | quad_grid
     image_vlm_check: bool = True
-    image_required: bool = True
+    image_required: bool = True  # require at least one of the article or Facebook images
 
     # --- time
     day_timezone: str = "Africa/Casablanca"
@@ -351,17 +351,6 @@ class Settings:
         except Exception:
             problems.append(f"DAY_TIMEZONE is invalid: {self.day_timezone}")
 
-        if (
-            self.needs_images
-            and self.image_provider == "cloudflare"
-            and self.image_required
-            and not self.cloudflare_ready()
-        ):
-            problems.append(
-                "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are required "
-                "when IMAGE_PROVIDER=cloudflare and images are generated"
-            )
-
         if need_publish:
             for name, value in (
                 ("BLOGGER_BLOG_ID", self.blogger_blog_id),
@@ -383,8 +372,11 @@ class Settings:
             out.append("Gemini keys are missing; article writing will fall back to Groq.")
 
         if self.needs_images:
-            if self.image_provider == "cloudflare" and not self.cloudflare_ready() and not self.image_required:
-                out.append("Cloudflare credentials are missing; images will be skipped (IMAGE_REQUIRED=false).")
+            if self.image_provider == "cloudflare" and not self.cloudflare_ready():
+                out.append(
+                    "Cloudflare credentials are missing; article-image generation is unavailable, "
+                    "but the original-photo Facebook image can still be created."
+                )
 
             if self.image_provider == "gemini":
                 if not (self.image_api_key or self.gemini_api_key or self.gemini_api_key_2 or self.gemini_api_key_3):
