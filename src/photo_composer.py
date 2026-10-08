@@ -16,7 +16,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageOps
 from pydantic import BaseModel, Field
 
 from . import logger
-from .gemini_client import GeminiClient, GeminiError
+from .gemini_client import GeminiClient
 from .models import SourceArticle
 from .utils import FetchError, PoliteFetcher
 from .visual_analyzer import ahash, hamming
