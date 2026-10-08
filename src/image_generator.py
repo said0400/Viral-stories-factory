@@ -4,6 +4,7 @@ IMAGE_MODE=faithful (default): create a reference-aware article thumbnail from t
 IMAGE_MODE=creative: create an editorial article thumbnail, still guided by available references.
 
 Facebook uses only original article pixels, selecting and cropping them with Groq analysis.
+The article thumbnail follows the detailed `thumbnail_prompt` written by Gemini.
 """
 from __future__ import annotations
 
@@ -24,6 +25,8 @@ from .photo_composer import (
     compose_original_square,
     compose_square,
     fetch_photos,
+    plan_layout,
+    refine_focus_boxes,
     to_reference,
 )
 from .utils import PoliteFetcher, sha256_hex
@@ -31,6 +34,7 @@ from .visual_analyzer import ahash, hamming
 
 ARTICLE_ASPECT = "16:9"
 FACEBOOK_ASPECT = "1:1"    # all Facebook panels and final composites are square
+MAX_THUMBNAIL_BRIEF_CHARS = 1200
 
 FAITHFUL = "faithful_restyle"
 
@@ -154,6 +158,7 @@ def _faithful_prompt(
     simple: bool,
     title: str = "",
     scene_idea: str = "",
+    thumbnail_brief: str = "",
 ) -> str:
     parts = [
         f"Create a premium, high-resolution square 1:1 editorial photograph." if aspect == "1:1" else f"Create a premium, high-resolution {aspect} editorial hero photograph.",
@@ -170,6 +175,13 @@ def _faithful_prompt(
         "No text overlays, headlines, captions, watermarks, logos, arrows, decorative borders, collages, or graphic frames.",
         "Thumbnail art direction: premium YouTube-style editorial thumbnail, instantly understandable at small size, one dominant subject, expressive but factual moment, strong focal separation, crisp details, clean composition, controlled contrast, and a visually compelling horizontal 16:9 frame.",
     ]
+
+    brief = " ".join(str(thumbnail_brief or "").split())[:MAX_THUMBNAIL_BRIEF_CHARS]
+    if brief:
+        parts.append(
+            "Detailed art-direction brief written from the verified story (follow it closely, but never contradict the reference photos): "
+            f"{brief}"
+        )
 
     if title:
         parts.append(f"Editorial subject context (do not render as text): {title}.")
@@ -197,10 +209,13 @@ def build_prompt(
     detail_scene_idea: str = "",
     composition_type: str = "SINGLE_HERO",
     simple: bool = False,
+    thumbnail_brief: str = "",
 ) -> str:
     """Build structural prompt based on exact prompt templates."""
     if strategy == FAITHFUL:
-        return _faithful_prompt(style, aspect, simple, title=title, scene_idea=scene_idea)
+        return _faithful_prompt(
+            style, aspect, simple, title=title, scene_idea=scene_idea, thumbnail_brief=thumbnail_brief
+        )
 
     comp = str(composition_type or "SINGLE_HERO").upper()
 
@@ -225,6 +240,10 @@ def build_prompt(
         "NO ADDED GRAPHICS: no headlines, captions, watermarks, logos, arrows, or artificial frames; preserve only legible story-relevant lettering already in the supplied reference.",
         f"SCENE DESCRIPTION: {scene_idea}. Make the main story subject prominent, visually distinct, and easy to understand at phone-feed size.",
     ]
+
+    brief = " ".join(str(thumbnail_brief or "").split())[:MAX_THUMBNAIL_BRIEF_CHARS]
+    if brief:
+        base.append(f"DETAILED ART-DIRECTION BRIEF (follow closely): {brief}")
 
     subject_type = getattr(v, "subject_type", None) or "other"
 
@@ -478,10 +497,12 @@ class ImageGenerator:
         if not selected_photos:
             raise ImageGenError("The official article did not provide a usable original photo for Facebook")
 
+        photos = list(selected_photos[:4])
         layout = str(self.cfg.facebook_layout or "auto").strip().lower()
         if layout == "auto":
-            layout = str(composition_type or "auto").strip().lower()
-        canvas, used_count = compose_original_square(selected_photos[:4], layout)
+            # The AI looks at the real selected crops, then picks the layout and the photo order.
+            layout, photos = plan_layout(self.gem, article, photos, str(composition_type or "auto"))
+        canvas, used_count = compose_original_square(photos[:4], layout)
         digest, visual_hash = _save_jpeg(canvas, out_path)
         logger.log(
             "PHOTO",
@@ -597,9 +618,12 @@ class ImageGenerator:
         ref: tuple[bytes, str] | None,
         detail_scene_idea: str = "",
         composition_type: str = "SINGLE_HERO",
+        thumbnail_brief: str = "",
     ) -> bytes:
         prompt = build_prompt(
-            strategy, style, v, scene_idea, title, aspect, detail_scene_idea=detail_scene_idea, composition_type=composition_type, simple=False
+            strategy, style, v, scene_idea, title, aspect,
+            detail_scene_idea=detail_scene_idea, composition_type=composition_type,
+            simple=False, thumbnail_brief=thumbnail_brief,
         )
         data, _mime = self.provider.generate(prompt, [ref] if ref else None, aspect)
         return data
@@ -623,6 +647,7 @@ class ImageGenerator:
         composition_type: str = "SINGLE_HERO",
         forbid_text: bool = False,
         extra_refs: list[tuple[bytes, str]] | None = None,
+        thumbnail_brief: str = "",
     ) -> tuple[str, str, str]:
         if strategy == FAITHFUL:
             plans: list[tuple[bool, tuple[bytes, str] | None]] = [(False, ref), (True, ref)]
@@ -640,7 +665,9 @@ class ImageGenerator:
                 strat, sty = strategy, style
 
             prompt = build_prompt(
-                strat, sty, v, scene_idea, title, aspect, detail_scene_idea=detail_scene_idea, composition_type=composition_type, simple=simple
+                strat, sty, v, scene_idea, title, aspect,
+                detail_scene_idea=detail_scene_idea, composition_type=composition_type,
+                simple=simple, thumbnail_brief=thumbnail_brief,
             )
 
             try:
@@ -717,6 +744,7 @@ class ImageGenerator:
         facebook_scene: str,
         facebook_detail_scene: str = "",
         facebook_composition_type: str = "INSET_CIRCLE_RIGHT",
+        thumbnail_prompt: str = "",
         source_ref: tuple[bytes, str] | None,
         source_url: str,
         source_sha: str,
@@ -741,6 +769,10 @@ class ImageGenerator:
             if source_photos
             else []
         )
+        if selected_source_photos:
+            # Feedback loop: the AI checks its own crop boxes and corrects them before use.
+            selected_source_photos = refine_focus_boxes(self.gem, article, selected_source_photos)
+
         article_refs = [to_reference(photo.image) for photo in selected_source_photos[:3]]
         if not article_refs and source_ref:
             article_refs = [source_ref]
@@ -796,6 +828,7 @@ class ImageGenerator:
             summary=summary,
             composition_type="SINGLE_HERO",
             extra_refs=article_extra_refs,
+            thumbnail_brief=thumbnail_prompt,
         )
 
         res = ImageResult(
@@ -812,6 +845,7 @@ class ImageGenerator:
                 "Output fidelity depends on provider/model capabilities; "
                 f"mode={self.cfg.image_mode}; provider={self.cfg.image_provider}; used={used}; "
                 f"reference_used={'yes' if reference_used else 'no'}; "
+                f"thumbnail_brief={'yes' if thumbnail_prompt.strip() else 'no'}; "
                 f"facebook_mode={self.cfg.facebook_image_mode}"
             ),
         )
