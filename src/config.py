@@ -10,8 +10,8 @@ from zoneinfo import ZoneInfo
 
 DEFAULT_EXPORTS_DIR = "data/exports"
 DEFAULT_CF_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev"
-DEFAULT_CONTENT_MODEL = "gemini-3.8-flash"
-DEFAULT_CONTENT_FALLBACKS = "gemini-3.6-flash,gemini-3.5-flash"
+DEFAULT_CONTENT_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_CONTENT_FALLBACKS = "gemini-3.5-flash-lite"
 DEFAULT_CINEMATIC_STYLE = (
     "premium editorial photojournalism, clear natural directional light, crisp subject detail, "
     "realistic skin and textures, balanced exposure, rich but natural color, clean contrast, "
@@ -91,14 +91,16 @@ class Settings:
     cinematic_style: str = DEFAULT_CINEMATIC_STYLE
     facebook_layout: str = "auto"           # auto | insets | diptychs | triptychs | quad_grid
     image_vlm_check: bool = True
-    image_required: bool = True  # require at least one of the article or Facebook images
+    # Require at least one of the article or Facebook images.
+    image_required: bool = True
 
     # --- time
     day_timezone: str = "Africa/Casablanca"
 
     # --- gemini
-    gemini_model: str = "gemini-3.5-flash-lite"              # fallback for Groq-led triage / visual analysis / image checks
-    gemini_fallback_model: str = "gemini-3.5-flash"
+    # Free-tier text and vision fallback.
+    gemini_model: str = "gemini-3.1-flash-lite"
+    gemini_fallback_model: str = "gemini-3.5-flash-lite"
     gemini_content_model: str = DEFAULT_CONTENT_MODEL         # article, titles, SEO, and social copy
     gemini_content_fallbacks: str = DEFAULT_CONTENT_FALLBACKS  # comma separated
     gemini_image_model: str = "gemini-3.1-flash-lite-image"
@@ -107,8 +109,8 @@ class Settings:
     gemini_api_key_3: str = ""
     image_api_key: str = ""
     groq_api_key: str = ""
-    groq_model: str = "openai/gpt-oss-120b"
-    groq_vision_model: str = "qwen/qwen3.8-27b"
+    groq_model: str = "openai/gpt-oss-20b"
+    groq_vision_model: str = ""
     llm_timeout: int = 180
 
     # --- image provider
@@ -243,18 +245,22 @@ class Settings:
             image_vlm_check=_bool("IMAGE_VLM_CHECK", True, env),
             image_required=_bool("IMAGE_REQUIRED", True, env),
             day_timezone=_str("DAY_TIMEZONE", "Africa/Casablanca", env),
-            gemini_model=_str("GEMINI_MODEL", "gemini-3.5-flash-lite", env),
-            gemini_fallback_model=_str("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash", env),
+            gemini_model=_str("GEMINI_MODEL", "gemini-3.1-flash-lite", env),
+            gemini_fallback_model=_str(
+                "GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite", env
+            ),
             gemini_content_model=_str("GEMINI_CONTENT_MODEL", DEFAULT_CONTENT_MODEL, env),
-            gemini_content_fallbacks=_str("GEMINI_CONTENT_FALLBACKS", DEFAULT_CONTENT_FALLBACKS, env),
+            gemini_content_fallbacks=_str(
+                "GEMINI_CONTENT_FALLBACKS", DEFAULT_CONTENT_FALLBACKS, env
+            ),
             gemini_image_model=_str("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-lite-image", env),
             gemini_api_key=_str("GEMINI_API_KEY_1", _str("GEMINI_API_KEY", "", env), env),
             gemini_api_key_2=_str("GEMINI_API_KEY_2", "", env),
             gemini_api_key_3=_str("GEMINI_API_KEY_3", "", env),
             image_api_key=_str("IMAGE_API_KEY", "", env),
             groq_api_key=_str("GROQ_API_KEY", "", env),
-            groq_model=_str("GROQ_MODEL", "openai/gpt-oss-120b", env),
-            groq_vision_model=_str("GROQ_VISION_MODEL", "qwen/qwen3.8-27b", env),
+            groq_model=_str("GROQ_MODEL", "openai/gpt-oss-20b", env),
+            groq_vision_model=_str("GROQ_VISION_MODEL", "", env),
             llm_timeout=_int("LLM_TIMEOUT", 180, env),
             image_provider=_str("IMAGE_PROVIDER", "cloudflare", env),
             cloudflare_account_id=_str("CLOUDFLARE_ACCOUNT_ID", "", env),
@@ -306,7 +312,7 @@ class Settings:
 
     @property
     def content_models(self) -> list[str]:
-        """Model chain for the writing + fact-check steps (strongest first, de-duplicated)."""
+        """Free-tier model chain for writing and fact-checking, de-duplicated."""
         names = [self.gemini_content_model, *self.gemini_content_fallbacks.split(",")]
         out: list[str] = []
         retired = {"gemini-2.5-flash"}
@@ -316,7 +322,7 @@ class Settings:
             if name and name.lower() not in retired and name not in out:
                 out.append(name)
 
-        return out or ["gemini-3.5-flash"]
+        return out or ["gemini-3.1-flash-lite"]
 
     # ------------------------------------------------------------------
     # Readiness
@@ -374,7 +380,8 @@ class Settings:
         if self.needs_images:
             if self.image_provider == "cloudflare" and not self.cloudflare_ready():
                 out.append(
-                    "Cloudflare credentials are missing; article-image generation is unavailable, "
+                    "Cloudflare credentials are missing; "
+                    "article-image generation is unavailable, "
                     "but the original-photo Facebook image can still be created."
                 )
 
