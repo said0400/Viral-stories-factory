@@ -404,11 +404,22 @@ def test_high_quality_image_dimensions_and_cloudflare_reference_limit():
     assert cfg.image_long_side == 1536
     assert cfg.cloudflare_image_steps == 25
     assert "gemini-2.5-flash" not in cfg.content_models
-    assert cfg.gemini_fallback_model == "gemini-3.5-flash"
+    assert cfg.gemini_model == "gemini-3.1-flash-lite"
+    assert cfg.gemini_fallback_model == "gemini-3.5-flash-lite"
+    assert cfg.content_models == ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
+    assert cfg.groq_model == "openai/gpt-oss-20b"
+    assert cfg.groq_vision_model == ""
+    empty_content_models = Settings(
+        gemini_content_model="", gemini_content_fallbacks=""
+    ).content_models
+    assert empty_content_models == ["gemini-3.1-flash-lite"]
     overridden = Settings.from_env({
-        "GEMINI_CONTENT_FALLBACKS": "gemini-3.6-flash,gemini-2.5-flash",
+        "GEMINI_CONTENT_FALLBACKS": "gemini-3.5-flash-lite,gemini-2.5-flash",
     })
-    assert overridden.content_models == ["gemini-3.8-flash", "gemini-3.6-flash"]
+    assert overridden.content_models == [
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash-lite",
+    ]
 
 
 def test_whatsapp_chunking():
