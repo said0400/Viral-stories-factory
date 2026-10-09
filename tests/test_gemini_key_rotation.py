@@ -62,7 +62,9 @@ def test_gemini_rotates_to_next_key_after_rate_limit(monkeypatch):
 
 def test_gemini_falls_back_after_model_error_without_name_error(monkeypatch):
     monkeypatch.setattr(
-        GeminiClient, "_make_client", staticmethod(lambda _key, _timeout: FakeClient("key-one", []))
+        GeminiClient,
+        "_make_client",
+        staticmethod(lambda _key, _timeout: FakeClient("key-one", [])),
     )
     cfg = Settings(
         gemini_api_key="key-one",
@@ -93,7 +95,9 @@ def test_gemini_falls_back_after_model_error_without_name_error(monkeypatch):
 
 def test_gemini_falls_back_after_unexpected_name_error(monkeypatch):
     monkeypatch.setattr(
-        GeminiClient, "_make_client", staticmethod(lambda _key, _timeout: FakeClient("key-one", []))
+        GeminiClient,
+        "_make_client",
+        staticmethod(lambda _key, _timeout: FakeClient("key-one", [])),
     )
     cfg = Settings(
         gemini_api_key="key-one",
