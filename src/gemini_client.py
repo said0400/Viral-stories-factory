@@ -28,8 +28,8 @@ _RETRYABLE_WORDS = (
     "connection error",
 )
 
-# Calls with these tags use the strong model chain (GEMINI_CONTENT_MODEL + fallbacks).
-# Everything else (triage, visual analysis, image check) uses the cheaper GEMINI_MODEL.
+# Calls with these tags use the writing model chain (GEMINI_CONTENT_MODEL + fallbacks).
+# Other tasks use the lower-cost GEMINI_MODEL chain.
 _STRONG_TAGS = {"CONTENT", "ARTICLE", "METADATA", "FACTCHECK"}
 
 # While another model is still available in the chain, give up on a struggling model after this many attempts.
@@ -185,7 +185,7 @@ class GeminiClient:
             if name and name.lower() not in retired and name not in out:
                 out.append(name)
 
-        return out or ["gemini-3.5-flash"]
+        return out or ["gemini-3.1-flash-lite"]
 
     # ------------------------------------------------------------------
     # JSON generation
@@ -362,14 +362,16 @@ class GeminiClient:
                         continue
                     raise
                 except Exception as exc:
-                    # SDK/runtime failures must not block the configured fallback
-                    # model; log only the exception type, not potentially sensitive text.
+                    # SDK/runtime failures must not block the configured fallback model;
+                    # log only the exception type, not potentially sensitive text.
                     last = GeminiError(
-                        f"Unexpected {type(exc).__name__} while calling Gemini model {name}"
+                        f"Unexpected {type(exc).__name__} while calling Gemini "
+                        f"model {name}"
                     )
                     logger.warn(
                         tag,
-                        f"Unexpected {type(exc).__name__} from model '{name}'; trying the next configured model",
+                        f"Unexpected {type(exc).__name__} from model '{name}'; "
+                        "trying the next configured model",
                     )
                     if index + 1 < len(models):
                         continue
