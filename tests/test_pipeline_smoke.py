@@ -389,7 +389,9 @@ def test_cloudflare_credentials_are_not_required_for_original_facebook_image():
     assert any("original-photo Facebook image" in warning for warning in cfg.warnings())
 
 
-def test_blogger_accepts_facebook_only_image_when_image_is_required(tmp_path, monkeypatch):
+def test_blogger_accepts_facebook_only_image_when_image_is_required(
+    tmp_path, monkeypatch
+):
     from src.models import BloggerResult, GeneratedContent, StoryCache, StoryState
 
     facebook_image = tmp_path / "facebook.jpg"
@@ -417,7 +419,9 @@ def test_blogger_accepts_facebook_only_image_when_image_is_required(tmp_path, mo
         "publish_images",
         lambda _cfg, paths, _story_id: {paths[0]: "https://cdn.example/facebook.jpg"},
     )
-    monkeypatch.setattr(m.editorial, "render_blogger_html", lambda *_args: "<p>story</p>")
+    monkeypatch.setattr(
+        m.editorial, "render_blogger_html", lambda *_args: "<p>story</p>"
+    )
 
     factory = m.Factory.__new__(m.Factory)
     factory.cfg = cfg
