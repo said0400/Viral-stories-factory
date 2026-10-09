@@ -14,10 +14,12 @@ T = TypeVar("T", bound=BaseModel)
 
 
 class LLMRouter:
-    """Gemini writes articles and social copy; Groq leads analysis tasks.
+    """Gemini handles writing and all vision; Groq leads text-only analysis.
 
-    Each task falls back to the other provider when its preferred provider is
-    missing or fails. Image generation remains delegated to the configured image provider.
+    Text tasks may fall back to the other provider when the preferred provider
+    is missing or fails. Image-input tasks stay on Gemini to avoid a Groq vision
+    model that may be billed on upgraded accounts.
+    Image generation remains delegated to the configured image provider.
     """
 
     _GEMINI_PRIMARY_TAGS = {"ARTICLE", "METADATA"}
@@ -57,7 +59,11 @@ class LLMRouter:
         temperature: float = 0.7,
         tag: str = "LLM",
     ) -> T:
-        if str(tag).upper() in self._GEMINI_PRIMARY_TAGS:
+        if images:
+            # Keep image understanding on Gemini Flash-Lite. The Groq vision
+            # model is not part of the Free-tier defaults and may be billed.
+            preferred = [("Gemini", self.gemini)]
+        elif str(tag).upper() in self._GEMINI_PRIMARY_TAGS:
             preferred = [("Gemini", self.gemini), ("Groq", self.groq)]
         else:
             preferred = [("Groq", self.groq), ("Gemini", self.gemini)]
