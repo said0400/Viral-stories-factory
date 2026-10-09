@@ -460,7 +460,8 @@ class Factory:
 
                 if self.cfg.image_required and not _has_any_image(cache.image):
                     raise ImageGenError(
-                        "neither the article image nor the Facebook source-photo image is available"
+                        "neither the article image nor the Facebook "
+                        "source-photo image is available"
                     )
 
             except (ImageGenError, GeminiError) as exc:
@@ -473,13 +474,23 @@ class Factory:
                 if self.cfg.image_required:
                     raise StoryFailed("image", str(exc)) from exc
 
-                warn(tag, "both images are unavailable; continuing because IMAGE_REQUIRED=false")
+                warn(
+                    tag,
+                    "both images are unavailable; "
+                    "continuing because IMAGE_REQUIRED=false",
+                )
 
             else:
                 article_image_ok = bool(cache.image and _is_file(cache.image.path))
-                facebook_image_ok = bool(cache.image and _is_file(cache.image.facebook_path))
+                facebook_image_ok = bool(
+                    cache.image and _is_file(cache.image.facebook_path)
+                )
                 st.image_status = (
-                    "generated" if article_image_ok else "facebook_only" if facebook_image_ok else "failed"
+                    "generated"
+                    if article_image_ok
+                    else "facebook_only"
+                    if facebook_image_ok
+                    else "failed"
                 )
                 if article_image_ok:
                     st.image_generated_at = iso()
@@ -495,7 +506,11 @@ class Factory:
                     warn(
                         tag,
                         "article image unavailable; "
-                        + ("Facebook source-photo image remains available" if facebook_image_ok else "no image is available"),
+                        + (
+                            "Facebook source-photo image remains available"
+                            if facebook_image_ok
+                            else "no image is available"
+                        ),
                     )
 
                 if not self.dry:
@@ -575,7 +590,9 @@ class Factory:
         has_image = bool(img and _is_file(img.path))
 
         if self.cfg.image_required and not _has_any_image(img):
-            raise StoryFailed("validate", "both article and Facebook images are unavailable")
+            raise StoryFailed(
+                "validate", "both article and Facebook images are unavailable"
+            )
 
         image_url = ""
 
@@ -584,7 +601,11 @@ class Factory:
             if paths:
                 urls = publish_images(self.cfg, paths, st.story_id)
                 img.public_url = urls.get(img.path, "") if has_image else ""
-                img.facebook_public_url = urls.get(img.facebook_path, "") if _is_file(img.facebook_path) else ""
+                img.facebook_public_url = (
+                    urls.get(img.facebook_path, "")
+                    if _is_file(img.facebook_path)
+                    else ""
+                )
 
             if has_image:
                 image_url = img.public_url or data_uri(img.path)
