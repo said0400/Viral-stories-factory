@@ -660,7 +660,11 @@ class ImageGenerator:
             try:
                 source_photos = fetch_photos(article, self.fetcher, limit=8)
             except Exception as exc:
-                logger.warn("PHOTO", f"source-photo download failed ({type(exc).__name__}); continuing with article image")
+                logger.warn(
+                    "PHOTO",
+                    f"source-photo download failed ({type(exc).__name__}); "
+                    "continuing with article image",
+                )
 
         if source_ref:
             try:
@@ -674,12 +678,18 @@ class ImageGenerator:
         selected_source_photos: list[SelectedPhoto] = []
         if source_photos:
             try:
-                selected_source_photos = analyze_source_photos(self.gem, article, source_photos, limit=4)
+                selected_source_photos = analyze_source_photos(
+                    self.gem, article, source_photos, limit=4
+                )
                 if selected_source_photos:
                     # Feedback loop: the AI checks its own crop boxes and corrects them before use.
                     selected_source_photos = refine_focus_boxes(self.gem, article, selected_source_photos)
             except Exception as exc:
-                logger.warn("PHOTO", f"source-photo analysis failed ({type(exc).__name__}); using the first original photo")
+                logger.warn(
+                    "PHOTO",
+                    f"source-photo analysis failed ({type(exc).__name__}); "
+                    "using the first original photo",
+                )
 
             if not selected_source_photos:
                 selected_source_photos = [
@@ -714,7 +724,8 @@ class ImageGenerator:
             fb_error = type(exc).__name__
             logger.warn(
                 "PHOTO",
-                f"Facebook source-photo composition failed ({fb_error}); continuing with article image",
+                f"Facebook source-photo composition failed ({fb_error}); "
+                "continuing with article image",
             )
 
         article_refs = [to_reference(photo.image) for photo in selected_source_photos[:3]]
@@ -783,7 +794,8 @@ class ImageGenerator:
                 f"{'is available' if fb_path else 'is unavailable'}",
             )
             notes = (
-                f"article_image_error={article_error}; facebook_mode=source_pixels_only; "
+                f"article_image_error={article_error}; "
+                "facebook_mode=source_pixels_only; "
                 f"facebook_generation={fb_used or 'unavailable'}"
             )
             if fb_error:
@@ -826,7 +838,10 @@ class ImageGenerator:
         res.facebook_image_hash = fb_sha if fb_path else ""
         res.facebook_image_ahash = fb_ah if fb_path else ""
         if fb_path:
-            res.notes += f"; facebook_layout={self.cfg.facebook_layout or facebook_composition_type}"
+            res.notes += (
+                "; facebook_layout="
+                f"{self.cfg.facebook_layout or facebook_composition_type}"
+            )
         if fb_error:
             res.notes += f"; facebook_error={fb_error}"
 
