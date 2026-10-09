@@ -49,8 +49,8 @@ class GroqClient:
         self.cfg = cfg
         self.api_key = str(cfg.groq_api_key or "").strip()
         self.base_url = GROQ_API_BASE_URL
-        self.model = str(cfg.groq_model or "openai/gpt-oss-120b").strip()
-        self.vision_model = str(cfg.groq_vision_model or "qwen/qwen3.8-27b").strip()
+        self.model = str(cfg.groq_model or "openai/gpt-oss-20b").strip()
+        self.vision_model = str(cfg.groq_vision_model or "").strip()
 
     def is_configured(self) -> bool:
         return bool(self.api_key)
@@ -171,6 +171,11 @@ class GroqClient:
         image_inputs = images or []
         if len(image_inputs) > 3:
             raise GroqError("Groq vision accepts at most 3 images per request")
+        if image_inputs and not self.vision_model:
+            raise GroqError(
+                "GROQ_VISION_MODEL is disabled in the Free-tier defaults; "
+                "route image analysis through Gemini Flash-Lite"
+            )
 
         model = self.vision_model if image_inputs else self.model
         try:
