@@ -1,10 +1,12 @@
 import json
 import re
 
+import pytest
 from pydantic import BaseModel
 
 from src.config import Settings
-from src.groq_client import GroqClient
+from src.gemini_client import GeminiError
+from src.groq_client import GroqClient, GroqError
 from src.llm_router import LLMRouter
 from src.models import SourceArticle
 from src.photo_composer import (
@@ -59,6 +61,39 @@ def test_router_falls_back_in_both_directions():
     assert router.generate_json("p", ResultSchema, tag="ARTICLE").value == "groq-article"
 
 
+def test_router_sends_image_requests_only_to_gemini_free_model():
+    gemini = StubProvider("gemini-vision")
+    groq = StubProvider("groq-vision")
+    router = LLMRouter(gemini, groq)
+
+    result = router.generate_json(
+        "describe the image",
+        ResultSchema,
+        images=[(b"image", "image/jpeg")],
+        tag="VISUAL",
+    )
+
+    assert result.value == "gemini-vision"
+    assert gemini.calls == ["VISUAL"]
+    assert groq.calls == []
+
+
+def test_gemini_vision_failure_does_not_fall_back_to_groq_paid_vision():
+    gemini = StubProvider("unused", fail=True)
+    groq = StubProvider("must-not-be-used")
+    router = LLMRouter(gemini, groq)
+
+    with pytest.raises(GeminiError):
+        router.generate_json(
+            "describe the image",
+            ResultSchema,
+            images=[(b"image", "image/jpeg")],
+            tag="VISUAL",
+        )
+
+    assert groq.calls == []
+
+
 def test_groq_client_uses_chat_completions_json_and_separate_vision_model(monkeypatch):
     requests_seen = []
 
@@ -102,6 +137,21 @@ def test_groq_only_settings_are_valid_and_secret_is_redacted():
     assert settings.groq_api_key == "groq-secret-value"
     assert not settings.validate()
     assert "groq-secret-value" in settings.secret_values()
+
+
+def test_groq_vision_requires_explicit_model_instead_of_paid_default(monkeypatch):
+    def unexpected_request(*_args, **_kwargs):
+        raise AssertionError("unexpected Groq vision request without explicit model")
+
+    monkeypatch.setattr("src.groq_client.requests.post", unexpected_request)
+    client = GroqClient(Settings(groq_api_key="secret"))
+
+    with pytest.raises(GroqError, match="GROQ_VISION_MODEL is disabled"):
+        client.generate_json(
+            "describe image",
+            ResultSchema,
+            images=[(b"image", "image/jpeg")],
+        )
 
 
 def test_photo_analysis_splits_six_candidates_into_vision_batches():
@@ -166,7 +216,9 @@ def test_gpt_oss_uses_low_hidden_reasoning_for_json(monkeypatch):
         return Response()
 
     monkeypatch.setattr("src.groq_client.requests.post", fake_post)
-    client = GroqClient(Settings(groq_api_key="secret", groq_model="openai/gpt-oss-120b"))
+    client = GroqClient(
+        Settings(groq_api_key="secret", groq_model="openai/gpt-oss-20b")
+    )
     assert client.generate_json("return JSON", ResultSchema).value == "ok"
     assert captured["reasoning_effort"] == "low"
     assert captured["reasoning_format"] == "hidden"
